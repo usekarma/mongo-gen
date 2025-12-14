@@ -1,0 +1,31 @@
+mongo:
+  uri: "mongodb://localhost:27017"
+  db: "reports"
+  collection: "report_runs"
+
+run:
+  seed: 12345
+  mode: "realtime"     # realtime | accelerated
+  speed: 60            # only for accelerated (60x)
+  duration_seconds: 900
+  emit_every_seconds: 2
+  tag: "demo-20251213" # stamped into docs so you can filter/cleanup
+
+scenario: "sla_runs"
+
+sla_runs:
+  subscribers: 50
+  report_types:
+    daily_summary:   { sla_seconds: 30, weight: 3 }
+    activity_digest: { sla_seconds: 10, weight: 5 }
+    inventory_delta: { sla_seconds: 15, weight: 4 }
+    risk_scoring:    { sla_seconds: 20, weight: 2 }
+    fraud_watch:     { sla_seconds: 25, weight: 1 }
+
+  failure_rate: 0.08
+  breach_rate: 0.15
+
+  queue_delay_seconds: [1, 3]
+  start_to_complete_factor_ok: [0.4, 0.9]
+  start_to_complete_factor_breach: [1.2, 2.0]
+
