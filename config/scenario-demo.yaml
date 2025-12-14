@@ -1,0 +1,33 @@
+orchestrator:
+  tag: "demo-20251214"
+  duration_seconds: 1800
+  mode: "accelerated"
+  speed: 60
+
+generators:
+  - id: "baseline-fast"
+    config: "config/demo-sla.yaml"
+    overrides:
+      run.emit_every_seconds: 1
+      sla_runs.failure_rate: 0.02
+      sla_runs.breach_rate: 0.05
+      sla_runs.subscribers: 20
+
+  - id: "baseline-slow"
+    config: "config/demo-sla.yaml"
+    overrides:
+      run.emit_every_seconds: 4
+      sla_runs.failure_rate: 0.05
+      sla_runs.breach_rate: 0.10
+      sla_runs.subscribers: 20
+
+  - id: "brownout-fraud"
+    config: "config/demo-sla.yaml"
+    overrides:
+      run.emit_every_seconds: 2
+      sla_runs.failure_rate: 0.35
+      sla_runs.breach_rate: 0.60
+      sla_runs.report_types:
+        fraud_watch:
+          sla_seconds: 25
+          weight: 10

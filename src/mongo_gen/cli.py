@@ -10,6 +10,7 @@ from .engine import Engine
 from .rng import RNG
 from .sinks.mongo import MongoSink
 from .scenarios.sla_runs import SLARunsScenario, SLAConfig
+from .orchestrate import run_orchestrate
 
 app = typer.Typer(add_completion=False)
 
@@ -25,6 +26,7 @@ class RunCfg(BaseModel):
     duration_seconds: int = 900
     emit_every_seconds: float = 2
     tag: str = "demo"
+    generator_id: str = "gen-0"
 
 class ReportTypeCfg(BaseModel):
     sla_seconds: int
@@ -96,6 +98,7 @@ def run(
         clock=clock,
         sink=sink,
         tag=cfg.run.tag,
+        generator_id=cfg.run.generator_id,
     )
 
     typer.echo(f"[mongo-gen] scenario=sla_runs mode={cfg.run.mode} speed={cfg.run.speed} duration={cfg.run.duration_seconds}s every={cfg.run.emit_every_seconds}s tag={cfg.run.tag}")
@@ -123,3 +126,25 @@ def cleanup(
     res = coll.delete_many(q)
     typer.echo(f"[mongo-gen] deleted {res.deleted_count} documents")
 
+@app.command()
+def orchestrate(
+    scenario_path: str = typer.Argument(..., help="Path to scenario YAML (orchestrator + generators[])"),
+    tag: Optional[str] = typer.Option(None, help="Override orchestrator.tag"),
+    duration: Optional[int] = typer.Option(None, help="Override orchestrator.duration_seconds"),
+    mode: Optional[str] = typer.Option(None, help="Override orchestrator.mode (realtime|accelerated)"),
+    speed: Optional[float] = typer.Option(None, help="Override orchestrator.speed"),
+    runs_dir: str = typer.Option("runs", help="Where to write run manifests"),
+):
+    """
+    Run multiple generators in parallel as defined by a scenario YAML.
+    Writes a manifest to runs/<tag>.json.
+    """
+    code = run_orchestrate(
+        scenario_path,
+        tag_override=tag,
+        duration_override=duration,
+        mode_override=mode,
+        speed_override=speed,
+        runs_dir=runs_dir,
+    )
+    raise typer.Exit(code=code)

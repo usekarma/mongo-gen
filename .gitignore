@@ -1,0 +1,77 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# =========================
+# IDE / Editor
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# Runtime artifacts (mongo-gen)
+# =========================
+
+# Orchestrator run manifests
+runs/
+runs/*.json
+
+# Temporary generated configs
+/tmp/
+*.tmp.yaml
+
+# =========================
+# Mongo / local tooling
+# =========================
+.mongo/
+.dump/
+data/
+
+# =========================
+# Secrets / local overrides
+# =========================
+.env
+.env.*
+config/*local*.yaml
+config/*override*.yaml
+
+# =========================
+# Test artifacts
+# =========================
+.coverage
+.pytest_cache/
+htmlcov/
+
+# =========================
+# Docker (if added later)
+# =========================
+docker-compose.override.yml

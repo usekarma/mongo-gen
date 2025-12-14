@@ -8,6 +8,7 @@ from ..clock import Clock
 from ..rng import RNG
 from ..sinks.mongo import MongoSink
 
+
 @dataclass
 class SLAConfig:
     subscribers: int
@@ -18,6 +19,7 @@ class SLAConfig:
     start_to_complete_factor_ok: tuple[float, float]
     start_to_complete_factor_breach: tuple[float, float]
 
+
 @dataclass
 class SLARunsScenario:
     name: str
@@ -26,16 +28,22 @@ class SLARunsScenario:
     clock: Clock
     sink: MongoSink
     tag: str
+    generator_id: str = "gen-0"   # ✅ new
 
     def __post_init__(self) -> None:
         self._coll = self.sink.connect()
         self._subscribers = [f"sub-{i:03d}" for i in range(1, self.cfg.subscribers + 1)]
-        self._report_type_items = [(rt, float(meta.get("weight", 1.0))) for rt, meta in self.cfg.report_types.items()]
+        self._report_type_items = [
+            (rt, float(meta.get("weight", 1.0)))
+            for rt, meta in self.cfg.report_types.items()
+        ]
 
     def tick(self) -> None:
         now = self.clock.now()
 
-        run_id = f"run-{now.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        # ✅ include generator_id for uniqueness & debugging
+        run_id = f"run-{self.generator_id}-{now.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+
         subscriber_id = self.rng.choice(self._subscribers)
         report_type = self.rng.weighted_choice(self._report_type_items)
         sla_seconds = int(self.cfg.report_types[report_type]["sla_seconds"])
@@ -49,7 +57,9 @@ class SLARunsScenario:
         requested_at = now
         started_at = requested_at + timedelta(seconds=queue_delay)
 
-        fmin, fmax = self.cfg.start_to_complete_factor_breach if is_breach else self.cfg.start_to_complete_factor_ok
+        fmin, fmax = (
+            self.cfg.start_to_complete_factor_breach if is_breach else self.cfg.start_to_complete_factor_ok
+        )
         factor = fmin + (fmax - fmin) * self.rng.random()
         duration_s = max(1, int(sla_seconds * factor))
         completed_at = started_at + timedelta(seconds=duration_s)
@@ -58,6 +68,7 @@ class SLARunsScenario:
         self._coll.insert_one({
             "_id": run_id,
             "run_id": run_id,
+            "generator_id": self.generator_id,  # ✅ new
             "subscriber_id": subscriber_id,
             "report_type": report_type,
             "status": "requested",
@@ -88,4 +99,3 @@ class SLARunsScenario:
                 "status": "completed",
                 "completed_at": completed_at
             }})
-

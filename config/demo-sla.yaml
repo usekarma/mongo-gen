@@ -10,6 +10,7 @@ run:
   duration_seconds: 900
   emit_every_seconds: 2
   tag: "demo-20251213" # stamped into docs so you can filter/cleanup
+  generator_id: "local"
 
 scenario: "sla_runs"
 
