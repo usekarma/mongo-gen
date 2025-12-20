@@ -1,1 +1,1 @@
-__all__ = ['cli', 'scenario', 'engine', 'emit']
+__all__ = ['cli', 'scenario', 'engine', 'emit', 'emit_mongo']

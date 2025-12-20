@@ -1,12 +1,58 @@
 from __future__ import annotations
-from datetime import timedelta
-from typing import Dict, Iterator, List, Optional
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Iterator, List, Optional, Literal, Tuple
 import math
 import random
 import uuid
 
 from .scenario import Scenario, TrafficSegment, Incident, Hotspot
-from .utils import iso_z, utc_now
+from .utils import iso_z
+
+@dataclass(frozen=True)
+class RunRecord:
+    schema_version: int
+    scenario_id: str
+    incident_id: Optional[str]
+    tags: List[str]
+    event_id: str
+    run_id: str
+    subscriber_id: str
+    report_type: str
+    requested_at: datetime
+    completed_at: datetime
+    latency_ms: int
+    status: str
+    error_code: Optional[str]
+    dependency: Optional[str]
+
+    def to_jsonable(self, include_event_time: bool = True) -> dict:
+        d = {
+            "schema_version": self.schema_version,
+            "scenario_id": self.scenario_id,
+            "incident_id": self.incident_id,
+            "tags": self.tags,
+            "event_id": self.event_id,
+            "run_id": self.run_id,
+            "subscriber_id": self.subscriber_id,
+            "report_type": self.report_type,
+            "requested_at": iso_z(self.requested_at),
+            "completed_at": iso_z(self.completed_at),
+            "latency_ms": self.latency_ms,
+            "status": self.status,
+            "error_code": self.error_code,
+            "dependency": self.dependency,
+        }
+        if include_event_time:
+            d["event_time"] = iso_z(datetime.now(timezone.utc))
+        return d
+
+@dataclass(frozen=True)
+class MongoOp:
+    when: datetime
+    kind: Literal["insert", "update"]
+    run_id: str
+    payload: dict  # insert doc or update document
 
 def _weighted_choice(rng: random.Random, weights: Dict[str, float]) -> str:
     items = list(weights.items())
@@ -21,9 +67,6 @@ def _weighted_choice(rng: random.Random, weights: Dict[str, float]) -> str:
         if r <= c:
             return k
     return items[-1][0]
-
-def _det_uuid(rng: random.Random) -> str:
-    return str(uuid.UUID(int=rng.getrandbits(128)))
 
 def _traffic_rps_at(t: timedelta, segments: List[TrafficSegment]) -> float:
     for seg in segments:
@@ -75,7 +118,10 @@ def _poisson(rng: random.Random, lam: float) -> int:
         return k - 1
     return max(0, int(rng.gauss(lam, math.sqrt(lam))))
 
-def generate_runs(s: Scenario, seed: Optional[int] = None, include_event_time: bool = True) -> Iterator[dict]:
+def _det_uuid(rng: random.Random) -> str:
+    return str(uuid.UUID(int=rng.getrandbits(128)))
+
+def generate_runs(s: Scenario, seed: Optional[int] = None) -> Iterator[RunRecord]:
     rng = random.Random(seed if seed is not None else s.seed)
     subs = [f"sub-{i:04d}" for i in range(1, s.population.subscribers + 1)]
     report_weights = s.population.report_types
@@ -112,7 +158,6 @@ def generate_runs(s: Scenario, seed: Optional[int] = None, include_event_time: b
                 dependency = inc.dependency
                 incident_id = inc.incident_id
                 tags.extend(inc.tags or [])
-                tags.append("brownout")
                 if inc.dependency:
                     tags.append(inc.dependency)
 
@@ -140,22 +185,50 @@ def generate_runs(s: Scenario, seed: Optional[int] = None, include_event_time: b
             latency_ms = max(1, base + jitter + coupling + extra)
             completed_at = requested_at + timedelta(milliseconds=latency_ms)
 
-            doc = {
-                "schema_version": 1,
-                "scenario_id": s.scenario_id,
-                "incident_id": incident_id,
-                "tags": sorted(set(tags)) if tags else [],
-                "event_id": event_id,
-                "run_id": run_id,
-                "subscriber_id": subscriber_id,
-                "report_type": report_type,
-                "requested_at": iso_z(requested_at),
-                "completed_at": iso_z(completed_at),
-                "latency_ms": latency_ms,
-                "status": status,
-                "error_code": error_code,
-                "dependency": dependency,
-            }
-            if include_event_time:
-                doc["event_time"] = iso_z(utc_now())
-            yield doc
+            yield RunRecord(
+                schema_version=1,
+                scenario_id=s.scenario_id,
+                incident_id=incident_id,
+                tags=sorted(set(tags)) if tags else [],
+                event_id=event_id,
+                run_id=run_id,
+                subscriber_id=subscriber_id,
+                report_type=report_type,
+                requested_at=requested_at,
+                completed_at=completed_at,
+                latency_ms=latency_ms,
+                status=status,
+                error_code=error_code,
+                dependency=dependency,
+            )
+
+def run_to_mongo_ops(r: RunRecord, labels_on_insert: bool = False) -> Tuple[MongoOp, MongoOp]:
+    insert_doc = {
+        "_id": r.run_id,
+        "run_id": r.run_id,
+        "event_id": r.event_id,
+        "scenario_id": r.scenario_id,
+        "subscriber_id": r.subscriber_id,
+        "report_type": r.report_type,
+        "requested_at": r.requested_at,
+        "status": "REQUESTED",
+    }
+    if labels_on_insert:
+        insert_doc["incident_id"] = r.incident_id
+        insert_doc["tags"] = r.tags
+
+    update_doc = {
+        "$set": {
+            "status": r.status,
+            "completed_at": r.completed_at,
+            "latency_ms": r.latency_ms,
+            "error_code": r.error_code,
+            "dependency": r.dependency,
+            "incident_id": r.incident_id,
+            "tags": r.tags,
+        }
+    }
+    return (
+        MongoOp(when=r.requested_at, kind="insert", run_id=r.run_id, payload=insert_doc),
+        MongoOp(when=r.completed_at, kind="update", run_id=r.run_id, payload=update_doc),
+    )

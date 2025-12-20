@@ -4,19 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mongo-gen"
-version = "0.1.0"
-description = "Deterministic scenario-driven synthetic event generator (timeline 'drawing program')"
+version = "0.2.0"
+description = "Deterministic scenario-driven synthetic run generator with Mongo lifecycle writer"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "PyYAML>=6.0",
   "python-dateutil>=2.9.0",
+  "pymongo>=4.6",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
   "ruff>=0.6.0",
+  "mongomock>=4.1.2",
 ]
 
 [project.scripts]

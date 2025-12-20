@@ -1,13 +1,11 @@
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
-import uuid
 import re
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 def parse_iso_utc(s: str) -> datetime:
-    # Accept 'Z' or offset
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
     dt = datetime.fromisoformat(s)
@@ -38,6 +36,3 @@ def parse_duration(s: str) -> timedelta:
 def iso_z(dt: datetime) -> str:
     dt = dt.astimezone(timezone.utc)
     return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-def new_uuid() -> str:
-    return str(uuid.uuid4())

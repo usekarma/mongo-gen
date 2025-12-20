@@ -2,7 +2,7 @@ meta:
   scenario_id: "brownout_demo"
   seed: 123
   start_time: "2025-12-19T09:00:00Z"
-  duration: "3h"
+  duration: "15m"
   tick: "1s"
 
 population:
@@ -15,20 +15,20 @@ population:
 tracks:
   traffic:
     - from: "00:00"
-      to:   "01:00"
+      to:   "05:00"
       shape: constant
       rps: 10
-    - from: "01:00"
-      to:   "02:00"
+    - from: "05:00"
+      to:   "10:00"
       shape: ramp
       rps_from: 10
       rps_to: 40
-    - from: "02:00"
-      to:   "03:00"
+    - from: "10:00"
+      to:   "15:00"
       shape: sine
       rps_avg: 25
       rps_amp: 10
-      period: "10m"
+      period: "2m"
 
   latency:
     base_ms: 250
@@ -40,8 +40,8 @@ tracks:
     base_rate: 0.003
     incidents:
       - id: "inc-timeout-1"
-        at: "01:25"
-        duration: "7m"
+        at: "06:00"
+        duration: "2m"
         error_rate: 0.12
         error_code: "E_TIMEOUT"
         extra_latency_ms: 250
@@ -51,8 +51,8 @@ tracks:
           report_type: "credit_report"
 
   hotspots:
-    - at: "02:10"
-      duration: "10m"
+    - at: "11:00"
+      duration: "2m"
       subscriber_id: "sub-0042"
       extra_error_rate: 0.08
       extra_latency_ms: 300

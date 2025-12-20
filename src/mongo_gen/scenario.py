@@ -72,12 +72,14 @@ class Scenario:
 def _parse_hhmm(s: str) -> timedelta:
     parts = s.split(":")
     if len(parts) == 2:
-        h, m = parts
-        return timedelta(hours=int(h), minutes=int(m))
+        # Interpret as MM:SS (this is what your scenarios use)
+        m, sec = parts
+        return timedelta(minutes=int(m), seconds=int(sec))
     if len(parts) == 3:
+        # Interpret as HH:MM:SS
         h, m, sec = parts
         return timedelta(hours=int(h), minutes=int(m), seconds=int(sec))
-    raise ValueError(f"Invalid time offset '{s}', expected HH:MM or HH:MM:SS")
+    raise ValueError(f"Invalid time offset '{s}', expected MM:SS or HH:MM:SS")
 
 def load_scenario(path: str, seed_override: Optional[int] = None,
                   start_time_override: Optional[str] = None,
