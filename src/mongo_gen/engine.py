@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterator, Literal
 import random
+from uuid import uuid4
+from typing import Literal
 
 @dataclass(frozen=True)
 class Scenario:
@@ -10,6 +12,7 @@ class Scenario:
     duration: timedelta
     seed: int = 123
     rps: float = 2.0
+    ids: Literal["deterministic", "random"] = "deterministic"
 
 @dataclass(frozen=True)
 class Op:
@@ -34,7 +37,10 @@ def iter_ops(s: Scenario) -> Iterator[Op]:
         base = s.start_time + timedelta(seconds=sec)
         for _ in range(n):
             run += 1
-            rid = f"run-{run:08d}"
+            if s.ids == "random":
+                rid = f"run-{uuid4().hex}"
+            else:
+                rid = f"run-{run:08d}"
             t = base + timedelta(milliseconds=rng.randint(0,999))
             yield Op(t,"insert",rid,{"_id":rid,"run_id":rid,"requested_at":_iso_z(t)})
             yield Op(t+timedelta(milliseconds=200),"update",rid,{"$set":{"status":"SUCCESS"}})

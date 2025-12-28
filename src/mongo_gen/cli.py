@@ -33,11 +33,12 @@ def main(argv=None):
     c.add_argument("--batch-size", type=int, default=1000)
     c.add_argument("--unordered", action="store_true")
     c.add_argument("--drop", action="store_true", help="Drop the Mongo collection before writing")
+    c.add_argument("--ids", choices=["deterministic", "random"], default="deterministic")
 
     def _run(a):
         dur = _dur(a.duration)
         start = datetime.now(timezone.utc) - dur
-        ops = iter_ops(Scenario(start, dur))
+        ops = iter_ops(Scenario(start, dur, ids=a.ids))
         return emit(
             ops,
             mode=a.emit,
