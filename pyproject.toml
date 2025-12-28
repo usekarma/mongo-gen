@@ -1,29 +1,18 @@
-[build-system]
-requires = ["setuptools>=69", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "mongo-gen"
-version = "0.2.0"
-description = "Deterministic scenario-driven synthetic run generator with Mongo lifecycle writer"
-readme = "README.md"
+version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = [
-  "PyYAML>=6.0",
-  "python-dateutil>=2.9.0",
-  "pymongo>=4.6",
-]
-
-[project.optional-dependencies]
-dev = [
-  "pytest>=8.0",
-  "ruff>=0.6.0",
-  "mongomock>=4.1.2",
-]
+dependencies = []
 
 [project.scripts]
 mongo-gen = "mongo_gen.cli:main"
 
-[tool.ruff]
-line-length = 100
-target-version = "py310"
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

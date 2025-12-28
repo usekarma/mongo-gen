@@ -1,170 +1,162 @@
-# mongo-gen — scenario timeline “drawing program”
+# mongo-gen
 
-`mongo-gen` renders **repeatable, authored scenarios** into a stream of **report run lifecycles**.
+A **small, deterministic data generator** for producing realistic event streams
+for analytics, SLA dashboards, and pipeline testing.
 
-It is designed explicitly for an analytics / observability PoC pipeline:
-
-```
-mongo-gen → MongoDB → CDC (Debezium) → Kafka → ClickHouse → Grafana
-```
-
-(Optionally, the same stream may be consumed by an “agent” or automation system.)
+This tool is intentionally boring by default and explicit about randomness.
+If you don’t ask for chaos, you won’t get it.
 
 ---
 
-## What it does
+## What mongo-gen is (and is not)
 
-Given a scenario YAML describing **tracks** (traffic, latency, errors/incidents, hotspots) over a defined time window, `mongo-gen` generates realistic report runs with:
+**It is:**
+- A generator of time-ordered events (JSONL)
+- Deterministic by default
+- Designed for analytics (ClickHouse, Grafana, etc.)
+- Easy to reason about and rerun
 
-- Stable identifiers (`event_id`, `run_id`)
-- Canonical business time (`requested_at`, UTC)
-- Derived completion time (`completed_at`, `latency_ms`)
-- Ground-truth labels (`scenario_id`, `incident_id`, `tags`)
-
-The output is intentionally shaped to resemble real production lifecycle data once ingested downstream.
-
----
-
-## Determinism contract
-
-For a given:
-
-- scenario definition (`--scenario`)
-- random seed (`--seed`)
-
-the generated runs are **deterministic**.
-
-This guarantees:
-- reproducible dashboards
-- debuggable incident timelines
-- consistent demos
-
-If wall-clock fields (e.g. `event_time`) are included, output will not be byte-for-byte reproducible.  
-For MongoDB writes, the canonical truth always lives in:
-
-```
-requested_at / completed_at
-```
+**It is not:**
+- A full simulation framework
+- A production traffic emulator
+- A database migration tool
 
 ---
 
-## Install
+## Installation
+
+Create and activate a virtual environment (recommended):
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
 ```
 
----
-
-## Quick start (Mongo writer)
-
-### Backfill mode (recommended)
-
-Backfill writes all lifecycle events immediately, using authored timestamps.  
-This is the preferred mode for analytics, CDC pipelines, and dashboards.
+Install in editable mode:
 
 ```bash
-mongo-gen generate   --scenario examples/scenarios/brownout.yaml   --emit mongo   --mongo-uri "mongodb://localhost:27017"   --mongo-db reports   --mongo-coll report_runs   --seed 123   --mode backfill
+pip install -e .
 ```
 
-### Realtime replay (optional)
+---
 
-Realtime mode sleeps between operations so writes occur in wall-clock time.
+## Basic usage
 
-This exists mainly for interactive demos or live agents.
+Generate 10 seconds of data and write it to a file:
 
 ```bash
-mongo-gen generate   --scenario examples/scenarios/brownout.yaml   --emit mongo   --mongo-uri "mongodb://localhost:27017"   --mongo-db reports   --mongo-coll report_runs   --mode realtime   --speed 60
+mongo-gen generate --duration 10s --out /tmp/data.jsonl
 ```
 
-(`--speed 60` replays the scenario at 60× real time.)
-
----
-
-## Quick start (JSONL)
-
-Writes lifecycle events to disk for inspection, debugging, or offline analysis.
+Print to stdout instead:
 
 ```bash
-mongo-gen generate   --scenario examples/scenarios/brownout.yaml   --no-event-time   --out /tmp/runs.jsonl
+mongo-gen generate --duration 10s
 ```
 
-JSONL output does **not** simulate CDC and is not a substitute for MongoDB + Debezium.
-
 ---
 
-## Key CLI commands
+## Time behavior
 
-- `mongo-gen generate --scenario <file.yaml> [--emit jsonl|mongo]`
-- `mongo-gen preview --scenario <file.yaml>`
-- `mongo-gen scenario lint --scenario <file.yaml>`
-- `mongo-gen anchor ...` (anchored, append-only overlays)
-- `mongo-gen overlay --plan <plan.yaml>` (multi-layer timelines)
+By default, data is generated in a window **ending now (UTC)**.
 
----
-
-## Mongo lifecycle semantics
-
-For each run, `mongo-gen` emits:
-
-1. **INSERT** at `requested_at` with `status="REQUESTED"`
-2. **UPDATE** at `completed_at` with final `status`, `latency_ms`, and error fields
-
-### Document identity
-
-By default, the document `_id` is derived from the stable `run_id`.
-
-When using overlays (`anchor` / `overlay` commands), `_id` is namespaced as:
-
-```
-<overlay_id>:<test_run_id>:<run_id>
-```
-
-This enables:
-- repeated scenario execution
-- layered timelines
-- overlapping time windows
-
-without write collisions, while preserving CDC semantics.
-
----
-
-## Why overlays exist
-
-Overlays allow you to:
-- run multiple scenarios in the same time window
-- re-run scenarios without deleting data
-- layer incidents, hotspots, and traffic patterns
-
-Each execution is independently identifiable via `test_run_id` while sharing a common `overlay_id`.
-
----
-
-## Tests
-
-The test suite focuses on:
-
-- deterministic generation guarantees
-- authored vs wall-clock time semantics
-- lifecycle correctness (INSERT → UPDATE)
-- Mongo emitter behavior using `mongomock`
-
-Run with:
+You can explicitly anchor time with `--start-time`:
 
 ```bash
-pytest -q
+mongo-gen generate   --duration 15m   --start-time 2025-01-01T00:00:00Z
 ```
+
+This makes runs repeatable and debuggable.
 
 ---
 
-## Conceptual model
+## Determinism vs randomness (important)
 
-- **mongo-gen** — authored reality
-- **MongoDB** — system of record
-- **CDC** — truth conveyor
-- **ClickHouse** — timeline explainer
-- **Grafana** — human cognition layer
+mongo-gen separates **world randomness** from **identifier randomness**.
 
-This separation is intentional and is what makes the PoC valuable.
+### Seed (controls the world)
+
+- `--seed 123`  
+  Deterministic traffic shape, timing, failures, and latency.
+
+- `--seed random`  
+  Fully random world: different behavior every run.
+
+Default: deterministic.
+
+### IDs (controls identifiers only)
+
+- `--ids deterministic`  
+  Stable, sequential IDs (good for debugging).
+
+- `--ids random`  
+  UUID-based IDs (more production-like).
+
+Default: deterministic.
+
+### Common combinations
+
+| Use case | seed | ids |
+|--------|------|-----|
+| Dashboard development | fixed | deterministic |
+| SLA validation | fixed | deterministic |
+| Demo (realistic look) | fixed | random |
+| Fuzz / chaos testing | random | random |
+
+Randomness is **always opt-in**.
+
+---
+
+## Output format (JSONL)
+
+Each line is a single operation:
+
+```json
+{
+  "when": "2025-01-01T00:00:01.234Z",
+  "kind": "insert",
+  "run_id": "run-00000001",
+  "payload": {
+    "_id": "run-00000001",
+    "requested_at": "2025-01-01T00:00:01.234Z",
+    "status": "REQUESTED"
+  }
+}
+```
+
+Followed later by a matching `update` for the same `run_id`.
+
+---
+
+## Testing
+
+Run tests with:
+
+```bash
+python -m pytest
+```
+
+Tests are intentionally small and contract-focused.
+If a feature doesn’t have a test, it doesn’t belong here.
+
+---
+
+## Design philosophy
+
+- Explicit > clever
+- Deterministic by default
+- No hidden time or entropy
+- One feature at a time
+- Easy to delete and rebuild
+
+This tool exists to **reduce uncertainty**, not add to it.
+
+---
+
+## Roadmap (intentionally short)
+
+- `anchor` command (print effective time window)
+- Overlay as a pure JSONL → JSONL transform
+- Optional Mongo sink (only if needed)
+
+Anything else must earn its keep.

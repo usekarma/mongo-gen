@@ -1,22 +1,9 @@
-from __future__ import annotations
-from typing import Iterable, Optional
-import json
-import sys
+import json, sys
+from .engine import Op
 
-def write_jsonl(docs: Iterable[dict], out_path: Optional[str] = None) -> int:
-    if out_path:
-        f = open(out_path, "w", encoding="utf-8")
-        close = True
-    else:
-        f = sys.stdout
-        close = False
-    n = 0
-    try:
-        for d in docs:
-            f.write(json.dumps(d, separators=(",", ":"), ensure_ascii=False))
-            f.write("\n")
-            n += 1
-    finally:
-        if close:
-            f.close()
-    return n
+def emit_jsonl(ops, out):
+    f = sys.stdout if out == "-" else open(out,"w")
+    for op in ops:
+        f.write(json.dumps({"when":op.when.isoformat(),"kind":op.kind,"run_id":op.run_id,"payload":op.payload})+"\n")
+    if f is not sys.stdout:
+        f.close()
