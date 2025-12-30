@@ -1,44 +1,60 @@
 from __future__ import annotations
 
 import json
+import sys
 import random
-from typing import Iterable
+from typing import Iterable, Optional
+
+from .engine import Op
 
 
-def emit_jsonl(ops: Iterable, out: str) -> int:
+def emit_jsonl(ops: Iterable[Op], out: str = "-") -> int:
     """
-    Emit Op stream as JSONL. Each Op becomes one JSON object per line.
+    Write ops as JSON Lines:
+      {"when":"...Z","kind":"insert|update","run_id":"...","payload":{...}}
     """
-    import sys
+    def _row(op: Op) -> dict:
+        when = op.when
+        if getattr(when, "tzinfo", None) is None:
+            when = when.replace(tzinfo=None)
+        # Keep the engine's requested_at/completed_at already in Z.
+        return {
+            "when": when.isoformat(),
+            "kind": op.kind,
+            "run_id": op.run_id,
+            "payload": op.payload,
+        }
 
-    fh = sys.stdout if out == "-" else open(out, "w", encoding="utf-8")
-    close = fh is not sys.stdout
-    try:
+    if out == "-" or out == "":
         for op in ops:
-            fh.write(json.dumps({"when": op.when.isoformat(), "kind": op.kind, "run_id": op.run_id, "payload": op.payload}))
-            fh.write("\n")
-    finally:
-        if close:
-            fh.close()
+            sys.stdout.write(json.dumps(_row(op)) + "\n")
+        return 0
+
+    with open(out, "w", encoding="utf-8") as f:
+        for op in ops:
+            f.write(json.dumps(_row(op)) + "\n")
     return 0
 
 
 def emit_mongo(
-    ops: Iterable,
+    ops: Iterable[Op],
+    *,
     mongo_uri: str,
     mongo_db: str,
     mongo_coll: str,
-    batch_size: int = 1000,
-    unordered: bool = False,
     drop: bool = False,
+    batch_size: int = 1000,
 ) -> int:
     """
-    Mongo emitter assumes "one doc per run_id" using:
-      - insert -> InsertOne({_id/run_id/...})
-      - update -> UpdateOne({"_id": run_id}, {"$set": ...}, upsert=True)
-
-    This yields a final, query-friendly collection: one doc per run.
+    Apply ops to Mongo using upserts so each run_id collapses into ONE document.
+    - insert op: upsert with $set to baseline fields
+    - update op: upsert with the op.payload (typically {"$set": {...}})
     """
+    try:
+        from pymongo import MongoClient, UpdateOne
+    except Exception as e:
+        raise RuntimeError("pymongo is required for --emit mongo. Install: pip install pymongo") from e
+
     if not mongo_uri:
         raise ValueError("--mongo-uri is required when --emit mongo")
     if not mongo_db:
@@ -46,69 +62,34 @@ def emit_mongo(
     if not mongo_coll:
         raise ValueError("--mongo-coll is required when --emit mongo")
 
-    try:
-        from pymongo import MongoClient, InsertOne, UpdateOne
-    except Exception as e:
-        raise RuntimeError("pymongo is required for --emit mongo. Install: pip install pymongo") from e
-
     client = MongoClient(mongo_uri)
-    db = client[mongo_db]
-    coll = db[mongo_coll]
+    coll = client[mongo_db][mongo_coll]
 
     if drop:
         coll.drop()
 
-    batch = []
+    buf = []
     for op in ops:
         if op.kind == "insert":
-            doc = dict(op.payload)
-            # Ensure we always key by run_id for overwrite/upsert semantics
-            doc.setdefault("_id", op.run_id)
-            doc.setdefault("run_id", op.run_id)
-            batch.append(InsertOne(doc))
-        elif op.kind == "update":
-            # update payload is expected to contain mongo update operators, e.g. {"$set": {...}}
-            batch.append(UpdateOne({"_id": op.run_id}, op.payload, upsert=True))
+            # Set baseline doc fields (upsert=True). This makes one doc per run_id.
+            update = {"$set": op.payload}
+            buf.append(UpdateOne({"_id": op.run_id}, update, upsert=True))
         else:
-            raise ValueError(f"Unknown op.kind {op.kind!r}")
+            # op.payload is already a Mongo update doc (e.g. {"$set": {...}})
+            buf.append(UpdateOne({"_id": op.run_id}, op.payload, upsert=True))
 
-        if len(batch) >= batch_size:
-            coll.bulk_write(batch, ordered=(not unordered))
-            batch.clear()
+        if len(buf) >= batch_size:
+            coll.bulk_write(buf, ordered=False)
+            buf = []
 
-    if batch:
-        coll.bulk_write(batch, ordered=(not unordered))
+    if buf:
+        coll.bulk_write(buf, ordered=False)
 
     return 0
 
 
-def emit(
-    ops: Iterable,
-    mode: str,
-    out: str = "-",
-    mongo_uri: str = "",
-    mongo_db: str = "",
-    mongo_coll: str = "report_runs",
-    batch_size: int = 1000,
-    unordered: bool = False,
-    drop: bool = False,
-) -> int:
-    if mode == "jsonl":
-        return emit_jsonl(ops, out)
-    if mode == "mongo":
-        return emit_mongo(
-            ops,
-            mongo_uri=mongo_uri,
-            mongo_db=mongo_db,
-            mongo_coll=mongo_coll,
-            batch_size=batch_size,
-            unordered=unordered,
-            drop=drop,
-        )
-    raise ValueError(f"Unknown emit mode: {mode!r}")
-
-
 def overlay_mongo(
+    *,
     mongo_uri: str,
     mongo_db: str,
     mongo_coll: str,
@@ -117,79 +98,132 @@ def overlay_mongo(
     latency_mult: float,
     fail_rate: float,
     seed: int,
+    filter_tier: str | None = None,
+    filter_report_type: str | None = None,
+    extra_set: dict | None = None,
+    batch_size: int = 1000,
 ) -> int:
     """
-    Overlay is a *patch* on top of baseline data.
-    It updates existing run docs whose requested_at is within [overlay_start, overlay_end).
-
-    Assumes requested_at is a UTC Z string (lexicographically sortable),
-    and that the collection contains one doc per run_id (from emit_mongo upserts).
-
-    Effects:
-      - latency_ms *= latency_mult
-      - optionally flip status to FAILED for a deterministic subset
-      - set error_code/error_message for failures (simple)
+    Patch existing terminal run docs in [overlay_start, overlay_end) by:
+      - multiplying latency_ms
+      - flipping some to FAILED by fail_rate
+      - optionally adding extra $set fields
+    Does NOT upsert new docs.
+    Prints a JSON summary to stdout.
     """
-    if not mongo_uri:
-        raise ValueError("--mongo-uri is required for overlay")
-    if not mongo_db:
-        raise ValueError("--mongo-db is required for overlay")
-    if not mongo_coll:
-        raise ValueError("--mongo-coll is required for overlay")
-    if latency_mult <= 0:
-        raise ValueError("--latency-mult must be > 0")
-    if not (0.0 <= fail_rate <= 1.0):
-        raise ValueError("--fail-rate must be in [0,1]")
-
     try:
         from pymongo import MongoClient, UpdateOne
     except Exception as e:
         raise RuntimeError("pymongo is required for overlay. Install: pip install pymongo") from e
 
-    client = MongoClient(mongo_uri)
-    db = client[mongo_db]
-    coll = db[mongo_coll]
+    if not mongo_uri:
+        raise ValueError("--mongo-uri is required")
+    if not mongo_db:
+        raise ValueError("--mongo-db is required")
+    if not mongo_coll:
+        raise ValueError("--mongo-coll is required")
 
-    # Pull candidate run docs in the overlay window (terminal docs only)
-    q = {
+    client = MongoClient(mongo_uri)
+    coll = client[mongo_db][mongo_coll]
+
+    query = {
         "requested_at": {"$gte": overlay_start, "$lt": overlay_end},
         "status": {"$in": ["SUCCESS", "FAILED"]},
         "latency_ms": {"$type": "number"},
     }
+    if filter_tier:
+        query["subscriber_tier"] = filter_tier
+    if filter_report_type:
+        query["report_type"] = filter_report_type
 
-    # Sort by _id for stable iteration across runs
-    cursor = coll.find(q, {"_id": 1, "latency_ms": 1, "status": 1}).sort([("_id", 1)])
+    # Only need a few fields to patch
+    projection = {"_id": 1, "latency_ms": 1, "status": 1}
 
     rng = random.Random(seed)
-    ops = []
+    extra_set = extra_set or {}
+
     touched = 0
-    flipped = 0
+    failed_flipped = 0
 
+    buf = []
+
+    cursor = coll.find(query, projection)
     for doc in cursor:
-        touched += 1
         rid = doc["_id"]
-        old_latency = doc.get("latency_ms", 0) or 0
-        new_latency = int(max(1, round(old_latency * latency_mult)))
+        old_latency = int(doc.get("latency_ms") or 0)
+        new_latency = max(1, int(old_latency * float(latency_mult)))
 
-        # deterministically choose failures
-        make_failed = (rng.random() < fail_rate)
+        will_fail = rng.random() < float(fail_rate)
+        new_status = "FAILED" if will_fail else "SUCCESS"
 
-        update = {"$set": {"latency_ms": new_latency}}
-        if make_failed:
-            update["$set"]["status"] = "FAILED"
-            update["$set"]["error_code"] = "BROWNOUT"
-            update["$set"]["error_message"] = "Synthetic brownout overlay"
-            flipped += 1
+        # Count flips only when status changes
+        if doc.get("status") != new_status:
+            failed_flipped += 1 if new_status == "FAILED" else 0
 
-        ops.append(UpdateOne({"_id": rid}, update, upsert=False))
+        set_doc = {
+            "latency_ms": new_latency,
+            "status": new_status,
+        }
 
-        if len(ops) >= 1000:
-            coll.bulk_write(ops, ordered=False)
-            ops.clear()
+        if new_status == "FAILED":
+            set_doc.setdefault("error_code", rng.choice(["E_TIMEOUT", "E_UPSTREAM", "E_VALIDATION"]))
+            set_doc.setdefault("error_message", "synthetic overlay failure")
+        else:
+            # If it becomes success, remove error fields? Keep simple: leave them if present.
+            pass
 
-    if ops:
-        coll.bulk_write(ops, ordered=False)
+        # Apply any extra $set fields from CLI
+        for k, v in extra_set.items():
+            set_doc[k] = v
 
-    # Print a tiny summary (useful in pipelines)
-    print(json.dumps({"overlay_start": overlay_start, "overlay_end": overlay_end, "touched": touched, "failed_flipped": flipped}))
+        buf.append(UpdateOne({"_id": rid}, {"$set": set_doc}, upsert=False))
+        touched += 1
+
+        if len(buf) >= batch_size:
+            coll.bulk_write(buf, ordered=False)
+            buf = []
+
+    if buf:
+        coll.bulk_write(buf, ordered=False)
+
+    print(
+        json.dumps(
+            {
+                "overlay_start": overlay_start,
+                "overlay_end": overlay_end,
+                "touched": touched,
+                "failed_flipped": failed_flipped,
+                "filter_tier": filter_tier,
+                "filter_report_type": filter_report_type,
+                "latency_mult": latency_mult,
+                "fail_rate": fail_rate,
+                "seed": seed,
+                "extra_set": extra_set,
+            },
+            sort_keys=True,
+        )
+    )
     return 0
+
+
+def emit(
+    *,
+    ops: Iterable[Op],
+    emit: str,
+    out: str = "-",
+    drop: bool = False,
+    mongo_uri: Optional[str] = None,
+    mongo_db: Optional[str] = None,
+    mongo_coll: str = "report_runs",
+) -> int:
+    if emit == "jsonl":
+        return emit_jsonl(ops, out=out)
+    if emit == "mongo":
+        return emit_mongo(
+            ops,
+            mongo_uri=mongo_uri or "",
+            mongo_db=mongo_db or "",
+            mongo_coll=mongo_coll,
+            drop=drop,
+        )
+    raise ValueError(f"unknown emit mode: {emit!r}")
