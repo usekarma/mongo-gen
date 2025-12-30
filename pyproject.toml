@@ -16,3 +16,6 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[project.optional-dependencies]
+mongo = ["pymongo>=4.6"]
