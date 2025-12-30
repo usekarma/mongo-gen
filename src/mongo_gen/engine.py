@@ -21,7 +21,30 @@ class Scenario:
     subscriber_pool: int = 50
     report_types: tuple[str, ...] = ("BASIC", "STANDARD", "PREMIUM")
 
-    # Minimal realism knobs (keep defaults simple)
+    # -----------------------------
+    # Subscriber story knobs
+    # -----------------------------
+    # Make a few subscribers generate most traffic (Zipf-ish).
+    # 0 => uniform. Typical: 1.0–1.6. Higher => more “big customers”.
+    subscriber_skew: float = 1.2
+
+    # Assign subscriber_tier by subscriber rank in the pool.
+    # Example with pool=100:
+    # - top 10% => PREMIUM
+    # - next 30% => STANDARD
+    # - rest => BASIC
+    premium_pct: float = 0.10
+    standard_pct: float = 0.30
+
+    # Optional noisy-neighbor / problematic tenant behavior.
+    # If set, that subscriber experiences extra latency/failures.
+    hot_subscriber: str | None = None          # e.g. "sub-0042"
+    hot_latency_mult: float = 3.0              # multiply latency for that subscriber
+    hot_fail_extra_prob: float = 0.15          # add'l fail probability for that subscriber
+
+    # -----------------------------
+    # Minimal realism knobs
+    # -----------------------------
     long_tail_rate: float = 0.01          # ~1% long-tail spikes
     long_tail_mult_min: float = 5.0       # spikes multiply latency by 5–10x
     long_tail_mult_max: float = 10.0
@@ -48,6 +71,52 @@ def _iso_z(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _pick_subscriber_rank(rng: random.Random, pool: int, skew: float) -> int:
+    """
+    Returns a rank in [1..pool].
+    - skew <= 0 => uniform random
+    - skew > 0  => Zipf-ish: P(rank=k) ∝ 1/k^skew (heavy hitters)
+    """
+    if pool <= 1:
+        return 1
+    if skew <= 0:
+        return rng.randint(1, pool)
+
+    # Weighted draw without external deps; O(pool), fine for PoC sizes (<= a few thousand)
+    weights_sum = 0.0
+    weights = []
+    for i in range(1, pool + 1):
+        w = 1.0 / (i ** skew)
+        weights.append(w)
+        weights_sum += w
+
+    r = rng.random() * weights_sum
+    acc = 0.0
+    for i, w in enumerate(weights, start=1):
+        acc += w
+        if acc >= r:
+            return i
+    return pool
+
+
+def _tier_for_rank(rank: int, pool: int, premium_pct: float, standard_pct: float) -> str:
+    """
+    Assign tiers by rank (rank=1 is biggest customer).
+    premium_pct and standard_pct are fractions of pool.
+    """
+    if pool <= 0:
+        return "BASIC"
+
+    prem_n = max(1, int(round(pool * max(0.0, min(1.0, premium_pct)))))
+    std_n = max(0, int(round(pool * max(0.0, min(1.0, standard_pct)))))
+
+    if rank <= prem_n:
+        return "PREMIUM"
+    if rank <= prem_n + std_n:
+        return "STANDARD"
+    return "BASIC"
 
 
 def iter_ops(s: Scenario) -> Iterator[Op]:
@@ -78,7 +147,11 @@ def iter_ops(s: Scenario) -> Iterator[Op]:
 
             t = base + timedelta(milliseconds=rng.randint(0, 999))
 
-            subscriber_id = f"sub-{rng.randint(1, s.subscriber_pool):04d}"
+            # --- subscriber selection with story
+            rank = _pick_subscriber_rank(rng, s.subscriber_pool, s.subscriber_skew)
+            subscriber_id = f"sub-{rank:04d}"
+            subscriber_tier = _tier_for_rank(rank, s.subscriber_pool, s.premium_pct, s.standard_pct)
+
             report_type = rng.choice(s.report_types)
 
             # ---- latency model: per-type baseline + jitter + occasional long-tail spikes
@@ -91,12 +164,19 @@ def iter_ops(s: Scenario) -> Iterator[Op]:
             if rng.random() < s.long_tail_rate:
                 latency_ms = int(latency_ms * rng.uniform(s.long_tail_mult_min, s.long_tail_mult_max))
 
+            # noisy neighbor behavior (optional)
+            if s.hot_subscriber and subscriber_id == s.hot_subscriber:
+                latency_ms = int(max(1, latency_ms) * max(1.0, float(s.hot_latency_mult)))
+
             completed_at = t + timedelta(milliseconds=latency_ms)
 
-            # ---- failure model: base error_rate + extra chance on extreme tail
+            # ---- failure model: base error_rate + extra chance on extreme tail (+ hot subscriber)
             failed = (rng.random() < s.error_rate) or (
                 latency_ms > s.tail_fail_latency_ms and rng.random() < s.tail_fail_extra_prob
             )
+            if s.hot_subscriber and subscriber_id == s.hot_subscriber:
+                failed = failed or (rng.random() < float(s.hot_fail_extra_prob))
+
             final_status = "FAILED" if failed else "SUCCESS"
 
             # Insert: request received (non-terminal)
@@ -108,6 +188,7 @@ def iter_ops(s: Scenario) -> Iterator[Op]:
                     "_id": rid,
                     "run_id": rid,
                     "subscriber_id": subscriber_id,
+                    "subscriber_tier": subscriber_tier,
                     "report_type": report_type,
                     "requested_at": _iso_z(t),
                     "status": "REQUESTED",

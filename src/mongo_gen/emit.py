@@ -17,7 +17,6 @@ def emit_jsonl(ops: Iterable[Op], out: str = "-") -> int:
         when = op.when
         if getattr(when, "tzinfo", None) is None:
             when = when.replace(tzinfo=None)
-        # Keep the engine's requested_at/completed_at already in Z.
         return {
             "when": when.isoformat(),
             "kind": op.kind,
@@ -47,8 +46,6 @@ def emit_mongo(
 ) -> int:
     """
     Apply ops to Mongo using upserts so each run_id collapses into ONE document.
-    - insert op: upsert with $set to baseline fields
-    - update op: upsert with the op.payload (typically {"$set": {...}})
     """
     try:
         from pymongo import MongoClient, UpdateOne
@@ -71,12 +68,13 @@ def emit_mongo(
     buf = []
     for op in ops:
         if op.kind == "insert":
-            # Set baseline doc fields (upsert=True). This makes one doc per run_id.
-            update = {"$set": op.payload}
-            buf.append(UpdateOne({"_id": op.run_id}, update, upsert=True))
+            buf.append(
+                UpdateOne({"_id": op.run_id}, {"$set": op.payload}, upsert=True)
+            )
         else:
-            # op.payload is already a Mongo update doc (e.g. {"$set": {...}})
-            buf.append(UpdateOne({"_id": op.run_id}, op.payload, upsert=True))
+            buf.append(
+                UpdateOne({"_id": op.run_id}, op.payload, upsert=True)
+            )
 
         if len(buf) >= batch_size:
             coll.bulk_write(buf, ordered=False)
@@ -100,6 +98,7 @@ def overlay_mongo(
     seed: int,
     filter_tier: str | None = None,
     filter_report_type: str | None = None,
+    filter_subscriber: str | None = None,
     extra_set: dict | None = None,
     batch_size: int = 1000,
 ) -> int:
@@ -109,19 +108,11 @@ def overlay_mongo(
       - flipping some to FAILED by fail_rate
       - optionally adding extra $set fields
     Does NOT upsert new docs.
-    Prints a JSON summary to stdout.
     """
     try:
         from pymongo import MongoClient, UpdateOne
     except Exception as e:
         raise RuntimeError("pymongo is required for overlay. Install: pip install pymongo") from e
-
-    if not mongo_uri:
-        raise ValueError("--mongo-uri is required")
-    if not mongo_db:
-        raise ValueError("--mongo-db is required")
-    if not mongo_coll:
-        raise ValueError("--mongo-coll is required")
 
     client = MongoClient(mongo_uri)
     coll = client[mongo_db][mongo_coll]
@@ -131,12 +122,14 @@ def overlay_mongo(
         "status": {"$in": ["SUCCESS", "FAILED"]},
         "latency_ms": {"$type": "number"},
     }
+
     if filter_tier:
         query["subscriber_tier"] = filter_tier
     if filter_report_type:
         query["report_type"] = filter_report_type
+    if filter_subscriber:
+        query["subscriber_id"] = filter_subscriber
 
-    # Only need a few fields to patch
     projection = {"_id": 1, "latency_ms": 1, "status": 1}
 
     rng = random.Random(seed)
@@ -144,11 +137,9 @@ def overlay_mongo(
 
     touched = 0
     failed_flipped = 0
-
     buf = []
 
-    cursor = coll.find(query, projection)
-    for doc in cursor:
+    for doc in coll.find(query, projection):
         rid = doc["_id"]
         old_latency = int(doc.get("latency_ms") or 0)
         new_latency = max(1, int(old_latency * float(latency_mult)))
@@ -156,9 +147,8 @@ def overlay_mongo(
         will_fail = rng.random() < float(fail_rate)
         new_status = "FAILED" if will_fail else "SUCCESS"
 
-        # Count flips only when status changes
-        if doc.get("status") != new_status:
-            failed_flipped += 1 if new_status == "FAILED" else 0
+        if doc.get("status") != new_status and new_status == "FAILED":
+            failed_flipped += 1
 
         set_doc = {
             "latency_ms": new_latency,
@@ -168,13 +158,8 @@ def overlay_mongo(
         if new_status == "FAILED":
             set_doc.setdefault("error_code", rng.choice(["E_TIMEOUT", "E_UPSTREAM", "E_VALIDATION"]))
             set_doc.setdefault("error_message", "synthetic overlay failure")
-        else:
-            # If it becomes success, remove error fields? Keep simple: leave them if present.
-            pass
 
-        # Apply any extra $set fields from CLI
-        for k, v in extra_set.items():
-            set_doc[k] = v
+        set_doc.update(extra_set)
 
         buf.append(UpdateOne({"_id": rid}, {"$set": set_doc}, upsert=False))
         touched += 1
@@ -195,6 +180,7 @@ def overlay_mongo(
                 "failed_flipped": failed_flipped,
                 "filter_tier": filter_tier,
                 "filter_report_type": filter_report_type,
+                "filter_subscriber": filter_subscriber,
                 "latency_mult": latency_mult,
                 "fail_rate": fail_rate,
                 "seed": seed,
@@ -203,6 +189,7 @@ def overlay_mongo(
             sort_keys=True,
         )
     )
+
     return 0
 
 

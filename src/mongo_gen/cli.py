@@ -9,6 +9,10 @@ from .engine import Scenario, iter_ops
 from .emit import emit, overlay_mongo
 
 
+# -------------------------
+# helpers
+# -------------------------
+
 def _dur(s: str) -> timedelta:
     """
     Parse a compact duration like: 10s, 2m, 1h
@@ -50,6 +54,10 @@ def _print_json(obj: dict) -> None:
     print(json.dumps(obj, sort_keys=True))
 
 
+# -------------------------
+# cli
+# -------------------------
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="mongo-gen")
     g = p.add_subparsers(dest="cmd", required=True)
@@ -57,13 +65,12 @@ def main(argv=None) -> int:
     # -------------------------
     # anchor
     # -------------------------
-    a = g.add_parser("anchor", help="Print an anchored window for composing generate/overlay.")
+    a = g.add_parser("anchor", help="Print an anchored time window for composition.")
     a.add_argument("--duration", required=True, help="e.g. 10m, 2m, 30s")
     a.add_argument(
         "--end-time",
         help="UTC end time (ISO-8601 Z). If omitted, uses now().",
     )
-    a.add_argument("--format", choices=["json"], default="json")
 
     def _run_anchor(args) -> int:
         dur = _dur(args.duration)
@@ -90,10 +97,18 @@ def main(argv=None) -> int:
     c.add_argument("--rps", type=float, default=2.0)
     c.add_argument("--ids", choices=["deterministic", "random"], default="deterministic")
 
-    # Scenario knobs (these are the ones you wanted)
+    # Scenario knobs
     c.add_argument("--base-latency-ms", type=int, default=250)
     c.add_argument("--error-rate", type=float, default=0.02)
     c.add_argument("--subscriber-pool", type=int, default=50)
+
+    # ⭐ THE IMPORTANT ONE ⭐
+    c.add_argument(
+        "--subscriber-skew",
+        type=float,
+        default=1.2,
+        help="0=uniform subscribers, higher => few subscribers dominate traffic",
+    )
 
     # Output / emit
     c.add_argument("--emit", choices=["jsonl", "mongo"], default="jsonl")
@@ -101,9 +116,9 @@ def main(argv=None) -> int:
     c.add_argument("--drop", action="store_true", help="For --emit mongo: drop collection first.")
 
     # Mongo target
-    c.add_argument("--mongo-uri", help="MongoDB URI, required for --emit mongo")
-    c.add_argument("--mongo-db", help="Mongo DB name, required for --emit mongo")
-    c.add_argument("--mongo-coll", default="report_runs", help="Mongo collection name")
+    c.add_argument("--mongo-uri", help="MongoDB URI (required for --emit mongo)")
+    c.add_argument("--mongo-db", help="Mongo DB name (required for --emit mongo)")
+    c.add_argument("--mongo-coll", default="report_runs")
 
     def _run_generate(args) -> int:
         dur = _dur(args.duration)
@@ -118,6 +133,7 @@ def main(argv=None) -> int:
             base_latency_ms=args.base_latency_ms,
             error_rate=args.error_rate,
             subscriber_pool=args.subscriber_pool,
+            subscriber_skew=args.subscriber_skew,
         )
 
         ops = iter_ops(scenario)
@@ -135,9 +151,9 @@ def main(argv=None) -> int:
     c.set_defaults(func=_run_generate)
 
     # -------------------------
-    # overlay (patch)
+    # overlay
     # -------------------------
-    o = g.add_parser("overlay", help="Patch an anchored baseline window with a brownout overlay (Mongo-only).")
+    o = g.add_parser("overlay", help="Patch an anchored baseline window (Mongo-only).")
 
     # Baseline window definition
     o.add_argument("--duration", required=True, help="Baseline duration (e.g. 10m)")
@@ -154,6 +170,7 @@ def main(argv=None) -> int:
     # Targeting
     o.add_argument("--filter-tier", help="Only affect this subscriber tier (e.g. PREMIUM)")
     o.add_argument("--filter-report-type", help="Only affect this report type (e.g. BASIC)")
+    o.add_argument("--filter-subscriber", help="Only affect this subscriber_id (e.g. sub-0042)")
 
     # Overlay effects
     o.add_argument("--latency-mult", type=float, default=4.0)
@@ -195,19 +212,18 @@ def main(argv=None) -> int:
             if "=" not in kv:
                 raise ValueError(f"--set must be key=value, got {kv!r}")
             k, v = kv.split("=", 1)
-            v_strip = v.strip()
-            if v_strip.lower() in ("true", "false"):
-                v_parsed = v_strip.lower() == "true"
+            v = v.strip()
+            if v.lower() in ("true", "false"):
+                v = v.lower() == "true"
             else:
-                # try int/float, otherwise keep string
                 try:
-                    v_parsed = int(v_strip)
+                    v = int(v)
                 except ValueError:
                     try:
-                        v_parsed = float(v_strip)
+                        v = float(v)
                     except ValueError:
-                        v_parsed = v_strip
-            extra_set[k.strip()] = v_parsed
+                        pass
+            extra_set[k.strip()] = v
 
         return overlay_mongo(
             mongo_uri=args.mongo_uri,
@@ -220,6 +236,7 @@ def main(argv=None) -> int:
             seed=args.seed,
             filter_tier=args.filter_tier,
             filter_report_type=args.filter_report_type,
+            filter_subscriber=args.filter_subscriber,
             extra_set=extra_set,
         )
 
