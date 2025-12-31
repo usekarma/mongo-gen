@@ -49,6 +49,17 @@ class Scenario:
     long_tail_mult_min: float = 5.0       # spikes multiply latency by 5–10x
     long_tail_mult_max: float = 10.0
 
+    # Optional: cluster long-tail into short “episodes” so dashboards show clear events.
+    # 0 => disabled (pure per-run randomness).
+    long_tail_burst_window_s: int = 0   # e.g. 30 => once triggered, tail lasts ~30s
+    long_tail_burst_label: str | None = None  # if set, stamp this label on affected runs
+
+    # Optional: nonlinear “capacity knee”. If a run’s latency exceeds threshold,
+    # multiply it again to create an obvious cliff.
+    # 0 => disabled.
+    capacity_knee_threshold_ms: int = 0
+    capacity_knee_mult: float = 1.0
+
     # Per-report-type baseline offsets (ms) — makes type charts meaningful
     basic_base_ms: int = 180
     standard_base_ms: int = 260
@@ -159,9 +170,19 @@ def iter_ops(s: Scenario) -> Iterator[Op]:
 
             # jitter: asymmetric to keep things feeling “real” without being too wild
             latency_ms = max(1, int(base_ms + rng.randint(-40, 60)))
+            # long-tail spikes (optionally clustered into short episodes)
+            tail_active = False
+            if s.long_tail_burst_window_s and s.long_tail_burst_window_s > 0:
+                if tail_until is not None and t < tail_until:
+                    tail_active = True
+                elif rng.random() < s.long_tail_rate:
+                    tail_until = t + timedelta(seconds=int(s.long_tail_burst_window_s))
+                    tail_active = True
+            else:
+                if rng.random() < s.long_tail_rate:
+                    tail_active = True
 
-            # long-tail spikes
-            if rng.random() < s.long_tail_rate:
+            if tail_active:
                 latency_ms = int(latency_ms * rng.uniform(s.long_tail_mult_min, s.long_tail_mult_max))
 
             # noisy neighbor behavior (optional)
@@ -201,6 +222,8 @@ def iter_ops(s: Scenario) -> Iterator[Op]:
                 "latency_ms": latency_ms,
                 "status": final_status,
             }
+            if tail_active and s.long_tail_burst_label:
+                set_doc["phenomenon"] = s.long_tail_burst_label
             if failed:
                 set_doc["error_code"] = rng.choice(["E_TIMEOUT", "E_UPSTREAM", "E_VALIDATION"])
                 set_doc["error_message"] = "synthetic failure"

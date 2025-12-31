@@ -100,6 +100,17 @@ def main(argv=None) -> int:
     # Scenario knobs
     c.add_argument("--base-latency-ms", type=int, default=250)
     c.add_argument("--error-rate", type=float, default=0.02)
+    c.add_argument("--long-tail-rate", type=float, default=0.01)
+    c.add_argument("--long-tail-mult-min", type=float, default=5.0)
+    c.add_argument("--long-tail-mult-max", type=float, default=10.0)
+    c.add_argument("--long-tail-burst-window", type=int, default=0,
+                   help="If >0, cluster long-tail into episodes lasting N seconds (e.g. 30)")
+    c.add_argument("--long-tail-burst-label", default=None,
+                   help="If set, stamp this label on runs affected by long-tail episodes")
+    c.add_argument("--capacity-knee-threshold-ms", type=int, default=0,
+                   help="If >0, create a nonlinear cliff once latency exceeds this threshold")
+    c.add_argument("--capacity-knee-mult", type=float, default=1.0,
+                   help="Multiplier applied when capacity knee threshold is exceeded")
     c.add_argument("--subscriber-pool", type=int, default=50)
 
     # ⭐ THE IMPORTANT ONE ⭐
@@ -169,6 +180,8 @@ def main(argv=None) -> int:
 
     # Targeting
     o.add_argument("--filter-tier", help="Only affect this subscriber tier (e.g. PREMIUM)")
+    o.add_argument("--phenomenon", help="Stamp a phenomenon label on affected docs (e.g. tenant_brownout)")
+    o.add_argument("--alert-hint", help="Short human-readable alert hint to store on affected docs")
     o.add_argument("--filter-report-type", help="Only affect this report type (e.g. BASIC)")
     o.add_argument("--filter-subscriber", help="Only affect this subscriber_id (e.g. sub-0042)")
 
