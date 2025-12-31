@@ -13,6 +13,7 @@ mongo-gen generate \
   --base-latency-ms 230 \
   --error-rate 0.015 \
   --subscriber-pool 200 \
+  --subscriber-skew 1.4 \
   --mongo-uri "mongodb://localhost:27017" \
   --mongo-db reports \
   --mongo-coll report_runs
