@@ -1,5 +1,8 @@
 # mongo-gen MongoDB starter queries (MongoDB 7.0+)
 
+These queries are designed to validate **experiments** run via `run.sh`
+and to support **alertable signals** (SLA, failures, tail latency).
+
 Assumes:
 - DB: `reports`
 - Collection: `report_runs`
@@ -10,13 +13,16 @@ Assumes:
   - `status` in `REQUESTED|SUCCESS|FAILED`
   - `report_type` (string)
   - `subscriber_id` (string)
+  - optional: `phenomenon`, `alert_hint`
 
-> Tip: For better performance long-term, store `requested_at`/`completed_at` as BSON Date instead of strings.
-> These queries convert the ISO strings to Date using `$dateFromString`.
+> Tip: For production-scale use, store timestamps as BSON `Date`.
+> These examples convert ISO strings using `$dateFromString`.
 
 ---
 
 ## 0) Sanity: counts by status
+
+Use this immediately after `./run.sh <experiment>`.
 
 ```javascript
 db.getSiblingDB("reports").report_runs.aggregate([
@@ -28,6 +34,8 @@ db.getSiblingDB("reports").report_runs.aggregate([
 ---
 
 ## 1) P95 latency by report_type (overall)
+
+Validates tier skew and business impact.
 
 ```javascript
 db.getSiblingDB("reports").report_runs.aggregate([
@@ -46,16 +54,14 @@ db.getSiblingDB("reports").report_runs.aggregate([
 
 ## 2) Latency over time (per minute): p50 / p95
 
+Use this to spot **capacity cliffs** and tail behavior.
+
 ```javascript
 db.getSiblingDB("reports").report_runs.aggregate([
   {$match:{status:{$in:["SUCCESS","FAILED"]}, latency_ms:{$type:"number"}, requested_at:{$type:"string"}}},
-  {$addFields:{
-    req_dt:{$dateFromString:{dateString:"$requested_at"}}
-  }},
+  {$addFields:{req_dt:{$dateFromString:{dateString:"$requested_at"}}}},
   {$group:{
-    _id:{
-      bucket:{$dateTrunc:{date:"$req_dt", unit:"minute"}},
-    },
+    _id:{bucket:{$dateTrunc:{date:"$req_dt", unit:"minute"}}},
     n:{$sum:1},
     p50:{$percentile:{input:"$latency_ms", p:[0.50], method:"approximate"}},
     p95:{$percentile:{input:"$latency_ms", p:[0.95], method:"approximate"}}
@@ -74,6 +80,8 @@ db.getSiblingDB("reports").report_runs.aggregate([
 ---
 
 ## 3) Error rate over time (per minute)
+
+This isolates **hard failures** from performance issues.
 
 ```javascript
 db.getSiblingDB("reports").report_runs.aggregate([
@@ -99,7 +107,8 @@ db.getSiblingDB("reports").report_runs.aggregate([
 
 ## 4) SLA % met over time (per minute)
 
-Define an SLA threshold (example: 300ms). “Met” means `latency_ms <= SLA_MS` and `status == SUCCESS`.
+Example SLA: **300ms**  
+“Met” = `status == SUCCESS` **and** `latency_ms <= SLA_MS`.
 
 ```javascript
 const SLA_MS = 300;
@@ -113,8 +122,7 @@ db.getSiblingDB("reports").report_runs.aggregate([
     met:{$sum:{
       $cond:[
         {$and:[{$eq:["$status","SUCCESS"]}, {$lte:["$latency_ms", SLA_MS]}]},
-        1,
-        0
+        1,0
       ]
     }}
   }},
@@ -123,7 +131,7 @@ db.getSiblingDB("reports").report_runs.aggregate([
     bucket:"$_id.bucket",
     total:1,
     met:1,
-    sla_pct:{$cond:[{$eq:["$total",0]},0,{$multiply:[100,{$divide:["$met","$total"]}]}]}
+    sla_pct:{$cond:[{$eq:["$total",0)},0,{$multiply:[100,{$divide:["$met","$total"]}]}]}
   }},
   {$sort:{bucket:1}}
 ])
@@ -131,7 +139,45 @@ db.getSiblingDB("reports").report_runs.aggregate([
 
 ---
 
-## 5) Top slow subscribers (overall, p95)
+## 5) Bad outcome rate (recommended alert signal)
+
+**Bad outcome** = FAILED **or** SUCCESS with latency > 30s.
+
+This is the single best alert to start with.
+
+```javascript
+db.getSiblingDB("reports").report_runs.aggregate([
+  {$match:{status:{$in:["SUCCESS","FAILED"]}, latency_ms:{$type:"number"}, requested_at:{$type:"string"}}},
+  {$addFields:{req_dt:{$dateFromString:{dateString:"$requested_at"}}}},
+  {$group:{
+    _id:{bucket:{$dateTrunc:{date:"$req_dt", unit:"minute"}}},
+    total:{$sum:1},
+    bad:{$sum:{
+      $cond:[
+        {$or:[
+          {$eq:["$status","FAILED"]},
+          {$and:[{$eq:["$status","SUCCESS"]}, {$gt:["$latency_ms",30000]}]}
+        ]},
+        1,0
+      ]
+    }}
+  }},
+  {$project:{
+    _id:0,
+    bucket:"$_id.bucket",
+    total:1,
+    bad:1,
+    bad_outcome_pct:{$cond:[{$eq:["$total",0)},0,{$multiply:[100,{$divide:["$bad","$total"]}]}]}
+  }},
+  {$sort:{bucket:1}}
+])
+```
+
+---
+
+## 6) Top slow subscribers (overall, p95)
+
+Use this after a **tenant brownout** experiment.
 
 ```javascript
 db.getSiblingDB("reports").report_runs.aggregate([
@@ -149,7 +195,28 @@ db.getSiblingDB("reports").report_runs.aggregate([
 
 ---
 
-## 6) “Current” snapshot: last N completed runs
+## 7) Phenomenon markers (optional but powerful)
+
+If overlays stamped `phenomenon`, this shows **when named events occurred**.
+
+```javascript
+db.getSiblingDB("reports").report_runs.aggregate([
+  {$match:{phenomenon:{$exists:true}}},
+  {$group:{
+    _id:"$phenomenon",
+    first:{$min:"$requested_at"},
+    last:{$max:"$requested_at"},
+    n:{$sum:1}
+  }},
+  {$sort:{first:1}}
+])
+```
+
+---
+
+## 8) “Current” snapshot: last N completed runs
+
+Useful during live demos.
 
 ```javascript
 db.getSiblingDB("reports").report_runs.aggregate([
@@ -157,15 +224,13 @@ db.getSiblingDB("reports").report_runs.aggregate([
   {$addFields:{done_dt:{$dateFromString:{dateString:"$completed_at"}}}},
   {$sort:{done_dt:-1}},
   {$limit:20},
-  {$project:{_id:1, subscriber_id:1, report_type:1, status:1, latency_ms:1, requested_at:1, completed_at:1, error_code:1}}
+  {$project:{_id:1, subscriber_id:1, report_type:1, status:1, latency_ms:1, requested_at:1, completed_at:1, phenomenon:1}}
 ])
 ```
 
 ---
 
-## 7) Optional: create helpful indexes
-
-If you plan to query by time and status a lot:
+## 9) Optional: helpful indexes
 
 ```javascript
 db.getSiblingDB("reports").report_runs.createIndex({requested_at: 1, status: 1})
@@ -173,4 +238,5 @@ db.getSiblingDB("reports").report_runs.createIndex({report_type: 1, requested_at
 db.getSiblingDB("reports").report_runs.createIndex({subscriber_id: 1, requested_at: 1})
 ```
 
-Note: indexes on ISO string timestamps work lexicographically for UTC Zulu strings, but BSON Date is better long-term.
+Indexes on ISO strings work lexicographically for UTC Z strings,
+but BSON `Date` is preferred long-term.

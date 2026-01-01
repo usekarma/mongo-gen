@@ -1,162 +1,138 @@
 # mongo-gen
 
-A **small, deterministic data generator** for producing realistic event streams
-for analytics, SLA dashboards, and pipeline testing.
+mongo-gen is a **simple, deterministic synthetic workload generator** for producing
+MongoDB-style operational data suitable for observability, SLA, and SRE experiments.
 
-This tool is intentionally boring by default and explicit about randomness.
-If you don’t ask for chaos, you won’t get it.
+It is intentionally boring by default.
 
----
-
-## What mongo-gen is (and is not)
-
-**It is:**
-- A generator of time-ordered events (JSONL)
-- Deterministic by default
-- Designed for analytics (ClickHouse, Grafana, etc.)
-- Easy to reason about and rerun
-
-**It is not:**
-- A full simulation framework
-- A production traffic emulator
-- A database migration tool
+The goal is not realism for its own sake — the goal is to produce **explainable,
+repeatable phenomena** that can be pointed to in dashboards and alerts.
 
 ---
 
-## Installation
+## What this tool is (and is not)
 
-Create and activate a virtual environment (recommended):
+**mongo-gen is a generator, not a scenario runner.**
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
+- It does not embed stories or demos in the engine
+- It does not guess what you want to show
+- It produces structured events with controlled randomness
+
+All *intent* lives outside the generator.
+
+---
+
+## Project layout
+
+```
+mongo-gen/
+├── cli.py        # CLI + argument parsing
+├── engine.py     # event generation logic (“physics”)
+├── emit.py       # output sinks (MongoDB, etc.)
+└── run.sh        # experiment runner (human intent)
 ```
 
-Install in editable mode:
+`run.sh` is **not library code**.  
+It exists to answer one question:
 
-```bash
-pip install -e .
-```
+> *“What behavior am I trying to demonstrate right now?”*
 
 ---
 
 ## Basic usage
 
-Generate 10 seconds of data and write it to a file:
+Generate baseline load:
 
 ```bash
-mongo-gen generate --duration 10s --out /tmp/data.jsonl
+mongo-gen generate \
+  --duration 2h \
+  --emit mongo \
+  --mongo-uri mongodb://localhost:27017 \
+  --mongo-db reports \
+  --mongo-coll report_runs
 ```
 
-Print to stdout instead:
+Apply a degradation overlay:
 
 ```bash
-mongo-gen generate --duration 10s
+mongo-gen overlay \
+  --window 10m \
+  --offset 60m \
+  --latency-mult 5 \
+  --fail-rate 0.2 \
+  --mongo-uri mongodb://localhost:27017 \
+  --mongo-db reports \
+  --mongo-coll report_runs
 ```
 
 ---
 
-## Time behavior
+## Running experiments (recommended)
 
-By default, data is generated in a window **ending now (UTC)**.
+To keep intent explicit and repeatable, this repo uses **one script** —
+`run.sh` — to define experiments on top of the generator.
 
-You can explicitly anchor time with `--start-time`:
+### Why one script?
+
+- Avoids script sprawl
+- Makes demos repeatable
+- Forces experiments to be *named*
+
+If an experiment isn’t worth naming, it isn’t worth keeping.
+
+---
+
+### Usage
 
 ```bash
-mongo-gen generate   --duration 15m   --start-time 2025-01-01T00:00:00Z
+./run.sh steady
+./run.sh global
+./run.sh premium
+./run.sh basic
+./run.sh demo
 ```
 
-This makes runs repeatable and debuggable.
+Each experiment:
+- generates a deterministic base load
+- applies one or more **named overlays**
+- produces data that maps cleanly to dashboards and alerts
 
 ---
 
-## Determinism vs randomness (important)
+### Experiments
 
-mongo-gen separates **world randomness** from **identifier randomness**.
+| Experiment | What it shows | Why it exists |
+|----------|---------------|---------------|
+| `steady` | Baseline behavior | Control / sanity |
+| `global` | System-wide brownout | Capacity & reliability |
+| `premium` | Tier-specific regression | Business impact |
+| `basic` | Tier recovery marker | Attribution correctness |
+| `demo` | Combined stress | End-to-end narrative |
 
-### Seed (controls the world)
-
-- `--seed 123`  
-  Deterministic traffic shape, timing, failures, and latency.
-
-- `--seed random`  
-  Fully random world: different behavior every run.
-
-Default: deterministic.
-
-### IDs (controls identifiers only)
-
-- `--ids deterministic`  
-  Stable, sequential IDs (good for debugging).
-
-- `--ids random`  
-  UUID-based IDs (more production-like).
-
-Default: deterministic.
-
-### Common combinations
-
-| Use case | seed | ids |
-|--------|------|-----|
-| Dashboard development | fixed | deterministic |
-| SLA validation | fixed | deterministic |
-| Demo (realistic look) | fixed | random |
-| Fuzz / chaos testing | random | random |
-
-Randomness is **always opt-in**.
+The generator remains boring by default.  
+**All interesting behavior is opt-in and explicit.**
 
 ---
 
-## Output format (JSONL)
+## Phenomena and alertability
 
-Each line is a single operation:
+Overlays may optionally stamp metadata onto generated runs:
 
-```json
-{
-  "when": "2025-01-01T00:00:01.234Z",
-  "kind": "insert",
-  "run_id": "run-00000001",
-  "payload": {
-    "_id": "run-00000001",
-    "requested_at": "2025-01-01T00:00:01.234Z",
-    "status": "REQUESTED"
-  }
-}
-```
+- `phenomenon`: a short, human-readable label (e.g. `premium_regression`)
+- `alert_hint`: a suggested alert condition (free text)
 
-Followed later by a matching `update` for the same `run_id`.
-
----
-
-## Testing
-
-Run tests with:
-
-```bash
-python -m pytest
-```
-
-Tests are intentionally small and contract-focused.
-If a feature doesn’t have a test, it doesn’t belong here.
+These fields are not required for generation, but make it easier to:
+- add Grafana annotations
+- explain why an alert fired
+- point to a specific event during a demo
 
 ---
 
 ## Design philosophy
 
-- Explicit > clever
-- Deterministic by default
-- No hidden time or entropy
-- One feature at a time
-- Easy to delete and rebuild
+- Deterministic > clever
+- Explicit > magical
+- Deletable > feature-rich
+- Experiments > noise
 
-This tool exists to **reduce uncertainty**, not add to it.
-
----
-
-## Roadmap (intentionally short)
-
-- `anchor` command (print effective time window)
-- Overlay as a pure JSONL → JSONL transform
-- Optional Mongo sink (only if needed)
-
-Anything else must earn its keep.
+mongo-gen is meant to support **thinking**, not replace it.

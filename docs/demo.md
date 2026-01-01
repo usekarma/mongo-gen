@@ -1,10 +1,10 @@
-# mongo-gen demo (MongoDB, SLA metrics)
+# mongo-gen demo — end‑to‑end (MongoDB → SLA → alerts)
 
-This is the fastest way to prove the tool works end-to-end:
+This demo shows the **fastest path to “alert on that”** using mongo-gen:
 
-1) generate SLA-shaped data
-2) write to MongoDB
-3) query p95 / error rate / SLA%
+1) generate deterministic base load  
+2) run a named **experiment** via `run.sh`  
+3) verify SLA, failures, and tail behavior with MongoDB queries  
 
 Tested with **MongoDB 7.0.x** (requires `$percentile.method`).
 
@@ -14,59 +14,68 @@ Tested with **MongoDB 7.0.x** (requires `$percentile.method`).
 
 - MongoDB running locally at `mongodb://localhost:27017`
 - Your venv active and `mongo-gen` installed (`pip install -e .`)
-- Collection target: `reports.report_runs`
+- Project layout:
+
+```
+mongo-gen/
+├── cli.py
+├── engine.py
+├── emit.py
+└── run.sh
+```
+
+Target collection: `reports.report_runs`
 
 ---
 
-## 1) Populate Mongo with a fresh dataset (drop + deterministic IDs)
+## 1) Run an experiment (recommended)
 
-Generate 5 minutes of data and overwrite the collection:
+Use the single experiment runner. This keeps intent explicit.
 
 ```bash
-mongo-gen generate   --duration 5m   --emit mongo   --drop   --ids deterministic   --mongo-uri "mongodb://localhost:27017"   --mongo-db reports   --mongo-coll report_runs
+./run.sh demo
 ```
 
-Quick sanity:
+Other useful modes:
+
+```bash
+./run.sh steady     # baseline / control
+./run.sh global     # system-wide brownout
+./run.sh premium    # tier-specific regression
+./run.sh basic      # recovery marker
+```
+
+Each experiment:
+- generates base load
+- applies one or more overlays
+- produces **named phenomena** (when enabled) suitable for alerts
+
+---
+
+## 2) Sanity check the data
 
 ```bash
 mongosh "mongodb://localhost:27017" --eval '
 const d=db.getSiblingDB("reports");
 print("count:", d.report_runs.countDocuments({}));
-printjson(d.report_runs.find({}, {_id:1, status:1, latency_ms:1, report_type:1}).limit(3).toArray());
+printjson(
+  d.report_runs
+   .find({}, {_id:1, status:1, latency_ms:1, report_type:1, phenomenon:1})
+   .sort({requested_at:-1})
+   .limit(3)
+   .toArray()
+);
 '
 ```
 
----
-
-## 2) Append another dataset (no drop + random IDs)
-
-This simulates “multiple runs accumulating over time”:
-
-```bash
-mongo-gen generate   --duration 2m   --emit mongo   --ids random   --mongo-uri "mongodb://localhost:27017"   --mongo-db reports   --mongo-coll report_runs
-```
+You should see:
+- mixed SUCCESS / FAILED
+- realistic latency spread
+- optional `phenomenon` labels during overlays
 
 ---
 
-## 3) Reproduce an exact time window (anchor + start-time)
-
-Print a UTC window ending now:
-
-```bash
-mongo-gen anchor --duration 2m
-```
-
-Copy the `start_time` from the JSON output and replay it:
-
-```bash
-mongo-gen generate   --duration 2m   --start-time 2025-01-01T00:00:00Z   --emit mongo   --drop   --mongo-uri "mongodb://localhost:27017"   --mongo-db reports   --mongo-coll report_runs
-```
-
-(Replace the timestamp above with the one from `anchor`.)
-
----
-
-## 4) Query: p95 latency by report_type (overall)
+## 3) p95 latency by report_type (overall)
 
 ```bash
 mongosh "mongodb://localhost:27017" --eval '
@@ -86,7 +95,7 @@ printjson(d.report_runs.aggregate([
 
 ---
 
-## 5) Query: error rate over time (per minute)
+## 4) Error rate over time (per minute)
 
 ```bash
 mongosh "mongodb://localhost:27017" --eval '
@@ -113,9 +122,10 @@ printjson(d.report_runs.aggregate([
 
 ---
 
-## 6) Query: SLA % met over time (per minute)
+## 5) SLA % met over time (per minute)
 
-Example SLA: **300ms**, “met” means `status == SUCCESS` and `latency_ms <= SLA_MS`.
+Example SLA: **300ms**  
+“Met” = `status == SUCCESS` **and** `latency_ms <= SLA_MS`.
 
 ```bash
 mongosh "mongodb://localhost:27017" --eval '
@@ -147,3 +157,51 @@ printjson(d.report_runs.aggregate([
 ]).toArray());
 '
 ```
+
+---
+
+## 6) Bad outcome rate (recommended alert signal)
+
+“Bad outcome” = FAILED **or** SUCCESS with latency > 30s.
+
+```bash
+mongosh "mongodb://localhost:27017" --eval '
+const d=db.getSiblingDB("reports");
+printjson(d.report_runs.aggregate([
+  {$match:{status:{$in:["SUCCESS","FAILED"]}, latency_ms:{$type:"number"}, requested_at:{$type:"string"}}},
+  {$addFields:{req_dt:{$dateFromString:{dateString:"$requested_at"}}}},
+  {$group:{
+    _id:{bucket:{$dateTrunc:{date:"$req_dt", unit:"minute"}}},
+    total:{$sum:1},
+    bad:{$sum:{
+      $cond:[
+        {$or:[
+          {$eq:["$status","FAILED"]},
+          {$and:[{$eq:["$status","SUCCESS"]}, {$gt:["$latency_ms",30000]}]}
+        ]},
+        1,0
+      ]
+    }}
+  }},
+  {$project:{
+    _id:0,
+    bucket:"$_id.bucket",
+    total:1,
+    bad:1,
+    bad_outcome_pct:{$cond:[{$eq:["$total",0)},0,{$multiply:[100,{$divide:["$bad","$total"]}]}]}
+  }},
+  {$sort:{bucket:1}}
+]).toArray());
+'
+```
+
+---
+
+## What to point at in a demo
+
+- **Slow runs over time** → “performance degradation”
+- **Failures vs slow runs** → “hard vs soft failure”
+- **SLA % met** → “business impact”
+- **Bad outcome rate** → “single alert signal”
+
+If an experiment isn’t visible in at least one of these, it isn’t worth keeping.

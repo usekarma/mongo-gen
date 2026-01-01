@@ -33,7 +33,7 @@ def _parse_z(s: str) -> datetime:
 
 def test_anchor_json_has_start_end_and_duration(capsys):
     # Use a fixed end-time so the test is deterministic
-    rc = main(["anchor", "--duration", "10m", "--end-time", "2025-01-01T00:10:00Z", "--format", "json"])
+    rc = main(["anchor", "--duration", "10m", "--end-time", "2025-01-01T00:10:00Z"])
     assert rc == 0
 
     out = capsys.readouterr().out.strip()

@@ -25,7 +25,7 @@ def _mongo_available() -> bool:
 def test_anchor_generate_overlay_end_to_end(tmp_path, capsys):
     # 1) Anchor a deterministic window
     end_time = "2025-01-01T00:10:00Z"
-    rc = main(["anchor", "--duration", "10m", "--end-time", end_time, "--format", "json"])
+    rc = main(["anchor", "--duration", "10m", "--end-time", end_time])
     assert rc == 0
     anchor_out = capsys.readouterr().out.strip()
     anchor = json.loads(anchor_out)
