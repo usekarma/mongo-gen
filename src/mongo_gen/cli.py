@@ -79,7 +79,10 @@ def main(argv=None) -> int:
     # -------------------------
     c = g.add_parser("generate", help="Generate a baseline run stream.")
     c.add_argument("--duration", required=True)
-    c.add_argument("--start-time")
+
+    c.add_argument("--start-time", help="UTC start time (ISO-8601 Z). Mutually exclusive with --end-time.")
+    c.add_argument("--end-time", help="UTC end time (ISO-8601 Z). Mutually exclusive with --start-time.")
+
     c.add_argument("--seed", type=int, default=123)
     c.add_argument("--rps", type=float, default=2.0)
     c.add_argument("--ids", choices=["deterministic", "random"], default="deterministic")
@@ -99,6 +102,12 @@ def main(argv=None) -> int:
     c.add_argument("--capacity-knee-threshold-ms", type=int, default=0)
     c.add_argument("--capacity-knee-mult", type=float, default=1.0)
 
+    # DAG flags (new)
+    c.add_argument("--dag", action="store_true", help="Emit DAG docs to report_requests/report_attempts/dependency_calls/outcomes.")
+    c.add_argument("--workflow-pool", type=int, default=8)
+    c.add_argument("--dep-min", type=int, default=2)
+    c.add_argument("--dep-max", type=int, default=5)
+
     # Output
     c.add_argument("--emit", choices=["jsonl", "mongo"], default="jsonl")
     c.add_argument("--out", default="-")
@@ -111,7 +120,17 @@ def main(argv=None) -> int:
 
     def _run_generate(args) -> int:
         dur = _dur(args.duration)
-        start = _parse_utc_time(args.start_time) if args.start_time else (datetime.now(timezone.utc) - dur)
+
+        if args.start_time and args.end_time:
+            raise ValueError("use only one of --start-time or --end-time")
+
+        if args.start_time:
+            start = _parse_utc_time(args.start_time)
+        elif args.end_time:
+            end = _parse_utc_time(args.end_time)
+            start = end - dur
+        else:
+            start = datetime.now(timezone.utc) - dur
 
         scenario = Scenario(
             start_time=start,
@@ -130,6 +149,10 @@ def main(argv=None) -> int:
             long_tail_burst_label=args.long_tail_burst_label,
             capacity_knee_threshold_ms=args.capacity_knee_threshold_ms,
             capacity_knee_mult=args.capacity_knee_mult,
+            enable_dag=bool(args.dag),
+            workflow_pool=int(args.workflow_pool),
+            dep_min=int(args.dep_min),
+            dep_max=int(args.dep_max),
         )
 
         return emit(
@@ -194,7 +217,8 @@ def main(argv=None) -> int:
 
         ov_end = ov_start + win
 
-        extra_set = {}
+        # Build extra $set fields from --set key=value pairs
+        extra_set: dict = {}
         for kv in args.set:
             k, _, v = kv.partition("=")
             if not k:
@@ -210,12 +234,12 @@ def main(argv=None) -> int:
                     except ValueError:
                         pass
             extra_set[k.strip()] = v
-            
-            # Wire explicit overlay annotations
-            if args.phenomenon:
-                extra_set.setdefault("phenomenon", args.phenomenon)
-            if args.alert_hint:
-                extra_set.setdefault("alert_hint", args.alert_hint)
+
+        # Always apply annotations even if no --set provided
+        if args.phenomenon:
+            extra_set.setdefault("phenomenon", args.phenomenon)
+        if args.alert_hint:
+            extra_set.setdefault("alert_hint", args.alert_hint)
 
         return overlay_mongo(
             mongo_uri=args.mongo_uri,

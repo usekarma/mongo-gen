@@ -22,6 +22,10 @@ set -euo pipefail
 #   ERROR_RATE=0.015
 #   SUBSCRIBER_POOL=200
 #   SUBSCRIBER_SKEW=1.4
+#
+# DAG (optional; only used if mongo-gen supports flags)
+#   DAG=1                 default: 1 (enable DAG if supported)
+#   WORKFLOW_POOL=12       default: 12
 
 usage() {
   cat <<'EOF'
@@ -47,6 +51,10 @@ Optional tuning:
   ERROR_RATE       default: 0.015
   SUBSCRIBER_POOL  default: 200
   SUBSCRIBER_SKEW  default: 1.4
+
+DAG (only if supported by mongo-gen):
+  DAG              default: 1
+  WORKFLOW_POOL    default: 12
 EOF
 }
 
@@ -79,8 +87,11 @@ ERROR_RATE="${ERROR_RATE:-0.015}"
 SUBSCRIBER_POOL="${SUBSCRIBER_POOL:-200}"
 SUBSCRIBER_SKEW="${SUBSCRIBER_SKEW:-1.4}"
 
+# DAG controls
+DAG="${DAG:-1}"
+WORKFLOW_POOL="${WORKFLOW_POOL:-12}"
+
 # Start time: N hours ago (UTC) so dashboards have data immediately.
-# GNU date on Linux supports -d; this script assumes Linux (your EC2 hosts).
 START="$(date -u -d "${HOURS} hours ago" -Is | sed 's/+00:00/Z/')"
 
 supports_flag() {
@@ -102,10 +113,8 @@ phenomenon_args() {
   local alert_hint="$1"; shift
 
   if [[ "$PHENOMENON_STYLE" == "flag" ]]; then
-    # Newer CLI: explicit overlay annotations
     printf '%s\0' "--phenomenon" "$phenomenon" "--alert-hint" "$alert_hint"
   else
-    # Older CLI: stuff into extra_set (works because --set is supported)
     printf '%s\0' "--set" "phenomenon=$phenomenon" "--set" "alert_hint=$alert_hint"
   fi
 }
@@ -150,6 +159,18 @@ if supports_flag generate --long-tail-burst-window; then
   )
 fi
 
+# DAG flags (feature-detected so older mongo-gen still works)
+DAG_EXTRA=()
+if [[ "$DAG" != "0" ]] && supports_flag generate --dag; then
+  DAG_EXTRA+=( --dag )
+  if supports_flag generate --workflow-pool; then
+    DAG_EXTRA+=( --workflow-pool "$WORKFLOW_POOL" )
+  fi
+  echo "[run.sh] dag enabled (workflow_pool=$WORKFLOW_POOL)"
+else
+  echo "[run.sh] dag disabled (either DAG=0 or mongo-gen lacks --dag)"
+fi
+
 mongo-gen generate \
   --duration "${HOURS}h" \
   --start-time "$START" \
@@ -162,6 +183,7 @@ mongo-gen generate \
   --subscriber-pool "$SUBSCRIBER_POOL" \
   --subscriber-skew "$SUBSCRIBER_SKEW" \
   "${GEN_EXTRA[@]}" \
+  "${DAG_EXTRA[@]}" \
   --mongo-uri "$MONGO_URI" \
   --mongo-db "$MONGO_DB" \
   --mongo-coll "$MONGO_COLL"

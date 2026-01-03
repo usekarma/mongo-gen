@@ -9,12 +9,7 @@ from typing import Iterable, Optional
 from .engine import Op
 
 
-# =========================
-# Common helpers
-# =========================
-
 def _iso_z(dt: datetime) -> str:
-    """Force UTC ISO-8601 with trailing Z."""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -24,16 +19,7 @@ def _normalize_when(op: Op) -> str:
     return _iso_z(op.when)
 
 
-# =========================
-# JSONL emitter
-# =========================
-
 def emit_jsonl(ops: Iterable[Op], out: str = "-") -> int:
-    """
-    Write ops as JSON Lines:
-      {"when":"...Z","kind":"insert|update","run_id":"...","payload":{...}}
-    """
-
     def _row(op: Op) -> dict:
         return {
             "when": _normalize_when(op),
@@ -53,10 +39,6 @@ def emit_jsonl(ops: Iterable[Op], out: str = "-") -> int:
     return 0
 
 
-# =========================
-# Mongo emitter
-# =========================
-
 def emit_mongo(
     ops: Iterable[Op],
     *,
@@ -67,7 +49,10 @@ def emit_mongo(
     batch_size: int = 1000,
 ) -> int:
     """
-    Apply ops to Mongo using upserts so each run_id collapses into ONE document.
+    Apply ops to Mongo using upserts.
+    Supports multi-collection routing via payload["_coll"].
+    - If payload includes "_coll", that op writes to that collection.
+    - Otherwise writes to mongo_coll (default report_runs).
     """
     try:
         from pymongo import MongoClient, UpdateOne
@@ -82,32 +67,48 @@ def emit_mongo(
         raise ValueError("--mongo-coll is required when --emit mongo")
 
     client = MongoClient(mongo_uri)
-    coll = client[mongo_db][mongo_coll]
+    db = client[mongo_db]
 
     if drop:
-        coll.drop()
+        # drop only the primary coll; step coll is intentionally not dropped automatically
+        db[mongo_coll].drop()
 
-    buf: list[UpdateOne] = []
+    # buffer per collection to keep bulk writes efficient
+    bufs: dict[str, list[UpdateOne]] = {}
+
+    def _flush(coll_name: str) -> None:
+        buf = bufs.get(coll_name)
+        if not buf:
+            return
+        db[coll_name].bulk_write(buf, ordered=False)
+        buf.clear()
+
+    def _append(coll_name: str, op_u: UpdateOne) -> None:
+        bufs.setdefault(coll_name, []).append(op_u)
+        if len(bufs[coll_name]) >= batch_size:
+            _flush(coll_name)
 
     for op in ops:
-        # Normalize everything to $set
         payload = op.payload if "$set" in op.payload else {"$set": op.payload}
 
-        buf.append(UpdateOne({"_id": op.run_id}, payload, upsert=True))
+        # determine collection routing
+        target_coll = mongo_coll
+        # allow _coll hint inside either direct payload or $set payload
+        if isinstance(payload, dict) and "$set" in payload and isinstance(payload["$set"], dict):
+            hint = payload["$set"].get("_coll")
+            if hint:
+                target_coll = str(hint)
+                # don't store routing hint
+                payload["$set"].pop("_coll", None)
 
-        if len(buf) >= batch_size:
-            coll.bulk_write(buf, ordered=False)
-            buf.clear()
+        _append(target_coll, UpdateOne({"_id": op.run_id}, payload, upsert=True))
 
-    if buf:
-        coll.bulk_write(buf, ordered=False)
+    # flush all collections
+    for coll_name in list(bufs.keys()):
+        _flush(coll_name)
 
     return 0
 
-
-# =========================
-# Overlay logic
-# =========================
 
 def overlay_mongo(
     *,
@@ -127,8 +128,8 @@ def overlay_mongo(
 ) -> int:
     """
     Patch existing terminal run docs in [overlay_start, overlay_end).
+    (Steps are not patched here; you can add a 'overlay-steps' later if desired.)
     """
-
     try:
         from pymongo import MongoClient, UpdateOne
     except Exception as e:
@@ -184,6 +185,10 @@ def overlay_mongo(
             **extra_set,
         }
 
+        # keep sla_met coherent if present
+        if "sla_target_ms" in doc:
+            pass  # doc doesn't include it in projection; leave as-is unless you expand projection
+
         if new_status == "FAILED":
             set_doc.setdefault("error_code", rng.choice(["E_TIMEOUT", "E_UPSTREAM", "E_VALIDATION"]))
             set_doc.setdefault("error_message", "synthetic overlay failure")
@@ -219,10 +224,6 @@ def overlay_mongo(
 
     return 0
 
-
-# =========================
-# Dispatch
-# =========================
 
 def emit(
     *,
