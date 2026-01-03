@@ -3,37 +3,59 @@ from __future__ import annotations
 import json
 import sys
 import random
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 from .engine import Op
 
+
+# =========================
+# Common helpers
+# =========================
+
+def _iso_z(dt: datetime) -> str:
+    """Force UTC ISO-8601 with trailing Z."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _normalize_when(op: Op) -> str:
+    return _iso_z(op.when)
+
+
+# =========================
+# JSONL emitter
+# =========================
 
 def emit_jsonl(ops: Iterable[Op], out: str = "-") -> int:
     """
     Write ops as JSON Lines:
       {"when":"...Z","kind":"insert|update","run_id":"...","payload":{...}}
     """
+
     def _row(op: Op) -> dict:
-        when = op.when
-        if getattr(when, "tzinfo", None) is None:
-            when = when.replace(tzinfo=None)
         return {
-            "when": when.isoformat(),
+            "when": _normalize_when(op),
             "kind": op.kind,
             "run_id": op.run_id,
             "payload": op.payload,
         }
 
-    if out == "-" or out == "":
+    stream = sys.stdout if out in ("", "-") else open(out, "w", encoding="utf-8")
+    try:
         for op in ops:
-            sys.stdout.write(json.dumps(_row(op)) + "\n")
-        return 0
+            stream.write(json.dumps(_row(op)) + "\n")
+    finally:
+        if stream is not sys.stdout:
+            stream.close()
 
-    with open(out, "w", encoding="utf-8") as f:
-        for op in ops:
-            f.write(json.dumps(_row(op)) + "\n")
     return 0
 
+
+# =========================
+# Mongo emitter
+# =========================
 
 def emit_mongo(
     ops: Iterable[Op],
@@ -65,20 +87,17 @@ def emit_mongo(
     if drop:
         coll.drop()
 
-    buf = []
+    buf: list[UpdateOne] = []
+
     for op in ops:
-        if op.kind == "insert":
-            buf.append(
-                UpdateOne({"_id": op.run_id}, {"$set": op.payload}, upsert=True)
-            )
-        else:
-            buf.append(
-                UpdateOne({"_id": op.run_id}, op.payload, upsert=True)
-            )
+        # Normalize everything to $set
+        payload = op.payload if "$set" in op.payload else {"$set": op.payload}
+
+        buf.append(UpdateOne({"_id": op.run_id}, payload, upsert=True))
 
         if len(buf) >= batch_size:
             coll.bulk_write(buf, ordered=False)
-            buf = []
+            buf.clear()
 
     if buf:
         coll.bulk_write(buf, ordered=False)
@@ -86,13 +105,17 @@ def emit_mongo(
     return 0
 
 
+# =========================
+# Overlay logic
+# =========================
+
 def overlay_mongo(
     *,
     mongo_uri: str,
     mongo_db: str,
     mongo_coll: str,
-    overlay_start: str,
-    overlay_end: str,
+    overlay_start: str | datetime,
+    overlay_end: str | datetime,
     latency_mult: float,
     fail_rate: float,
     seed: int,
@@ -103,12 +126,9 @@ def overlay_mongo(
     batch_size: int = 1000,
 ) -> int:
     """
-    Patch existing terminal run docs in [overlay_start, overlay_end) by:
-      - multiplying latency_ms
-      - flipping some to FAILED by fail_rate
-      - optionally adding extra $set fields
-    Does NOT upsert new docs.
+    Patch existing terminal run docs in [overlay_start, overlay_end).
     """
+
     try:
         from pymongo import MongoClient, UpdateOne
     except Exception as e:
@@ -116,6 +136,14 @@ def overlay_mongo(
 
     client = MongoClient(mongo_uri)
     coll = client[mongo_db][mongo_coll]
+
+    def _as_iso(v):
+        if isinstance(v, datetime):
+            return _iso_z(v)
+        return v
+
+    overlay_start = _as_iso(overlay_start)
+    overlay_end = _as_iso(overlay_end)
 
     query = {
         "requested_at": {"$gte": overlay_start, "$lt": overlay_end},
@@ -137,7 +165,7 @@ def overlay_mongo(
 
     touched = 0
     failed_flipped = 0
-    buf = []
+    buf: list[UpdateOne] = []
 
     for doc in coll.find(query, projection):
         rid = doc["_id"]
@@ -153,20 +181,19 @@ def overlay_mongo(
         set_doc = {
             "latency_ms": new_latency,
             "status": new_status,
+            **extra_set,
         }
 
         if new_status == "FAILED":
             set_doc.setdefault("error_code", rng.choice(["E_TIMEOUT", "E_UPSTREAM", "E_VALIDATION"]))
             set_doc.setdefault("error_message", "synthetic overlay failure")
 
-        set_doc.update(extra_set)
-
         buf.append(UpdateOne({"_id": rid}, {"$set": set_doc}, upsert=False))
         touched += 1
 
         if len(buf) >= batch_size:
             coll.bulk_write(buf, ordered=False)
-            buf = []
+            buf.clear()
 
     if buf:
         coll.bulk_write(buf, ordered=False)
@@ -192,6 +219,10 @@ def overlay_mongo(
 
     return 0
 
+
+# =========================
+# Dispatch
+# =========================
 
 def emit(
     *,

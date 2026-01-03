@@ -3,12 +3,11 @@ set -euo pipefail
 
 # run.sh — run synthetic “experiments” with mongo-gen
 #
-# Usage:
-#   ./run.sh steady
-#   ./run.sh global
-#   ./run.sh premium
-#   ./run.sh basic
-#   ./run.sh demo
+# Intended usage:
+#   ./run.sh steady|global|premium|basic|demo
+#
+# Typical SSM usage after installing as /usr/local/bin/mongo-gen-run:
+#   mongo-gen-run demo
 #
 # Env overrides (optional):
 #   MONGO_URI="mongodb://localhost:27017"
@@ -17,8 +16,55 @@ set -euo pipefail
 #   HOURS=2
 #   RPS=1.2
 #   SEED_BASE=40
+#
+# Optional tuning:
+#   BASE_LATENCY_MS=230
+#   ERROR_RATE=0.015
+#   SUBSCRIBER_POOL=200
+#   SUBSCRIBER_SKEW=1.4
+
+usage() {
+  cat <<'EOF'
+Usage: run.sh <experiment>
+
+Experiments:
+  steady   baseline only
+  global   global brownout overlay
+  premium  premium-tier regression overlay
+  basic    basic-tier "recovery marker" overlay
+  demo     global + premium + basic
+
+Env overrides:
+  MONGO_URI        default: mongodb://localhost:27017
+  MONGO_DB         default: reports
+  MONGO_COLL       default: report_runs
+  HOURS            default: 2
+  RPS              default: 1.2
+  SEED_BASE        default: 40
+
+Optional tuning:
+  BASE_LATENCY_MS  default: 230
+  ERROR_RATE       default: 0.015
+  SUBSCRIBER_POOL  default: 200
+  SUBSCRIBER_SKEW  default: 1.4
+EOF
+}
 
 EXPERIMENT="${1:-demo}"
+case "${EXPERIMENT}" in
+  steady|global|premium|basic|demo) ;;
+  -h|--help|help) usage; exit 0 ;;
+  *)
+    echo "Unknown experiment: ${EXPERIMENT}" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
+command -v mongo-gen >/dev/null 2>&1 || {
+  echo "mongo-gen not found in PATH. Install /usr/local/bin/mongo-gen wrapper first." >&2
+  exit 127
+}
 
 MONGO_URI="${MONGO_URI:-mongodb://localhost:27017}"
 MONGO_DB="${MONGO_DB:-reports}"
@@ -28,28 +74,41 @@ HOURS="${HOURS:-2}"
 RPS="${RPS:-1.2}"
 SEED_BASE="${SEED_BASE:-40}"
 
+BASE_LATENCY_MS="${BASE_LATENCY_MS:-230}"
+ERROR_RATE="${ERROR_RATE:-0.015}"
+SUBSCRIBER_POOL="${SUBSCRIBER_POOL:-200}"
+SUBSCRIBER_SKEW="${SUBSCRIBER_SKEW:-1.4}"
+
 # Start time: N hours ago (UTC) so dashboards have data immediately.
+# GNU date on Linux supports -d; this script assumes Linux (your EC2 hosts).
 START="$(date -u -d "${HOURS} hours ago" -Is | sed 's/+00:00/Z/')"
 
-# Base load knobs (tweak as you like)
-BASE_LATENCY_MS=230
-ERROR_RATE=0.015
-SUBSCRIBER_POOL=200
-SUBSCRIBER_SKEW=1.4
-
-# Helper: detect whether your installed mongo-gen supports --phenomenon/--alert-hint
-supports_overlay_flag() {
-  local flag="$1"
-  mongo-gen overlay -h 2>&1 | grep -q -- "$flag"
+supports_flag() {
+  # supports_flag <subcommand> <flag>
+  local sub="$1"; shift
+  local flag="$1"; shift
+  mongo-gen "$sub" -h 2>&1 | grep -q -- "$flag"
 }
 
-PHENOMENON_ARGS=()
-if supports_overlay_flag --phenomenon; then
-  # We'll attach these only when supported, so the script works even on older builds.
-  PHENOMENON_SUPPORTED=1
-else
-  PHENOMENON_SUPPORTED=0
+# If overlay supports dedicated flags, use them; otherwise fall back to --set.
+PHENOMENON_STYLE="set"
+if supports_flag overlay --phenomenon; then
+  PHENOMENON_STYLE="flag"
 fi
+
+phenomenon_args() {
+  # phenomenon_args <phenomenon> <alert_hint>
+  local phenomenon="$1"; shift
+  local alert_hint="$1"; shift
+
+  if [[ "$PHENOMENON_STYLE" == "flag" ]]; then
+    # Newer CLI: explicit overlay annotations
+    printf '%s\0' "--phenomenon" "$phenomenon" "--alert-hint" "$alert_hint"
+  else
+    # Older CLI: stuff into extra_set (works because --set is supported)
+    printf '%s\0' "--set" "phenomenon=$phenomenon" "--set" "alert_hint=$alert_hint"
+  fi
+}
 
 overlay() {
   # overlay <window> <offset> <latency_mult> <fail_rate> <seed> [extra args...]
@@ -78,10 +137,8 @@ echo "[run.sh] experiment=$EXPERIMENT start=$START duration=${HOURS}h mongo=$MON
 # ----------------------------
 # Base generate (always)
 # ----------------------------
-# Note: If your current mongo-gen doesn't have the extra generate knobs yet,
-# remove the long-tail/capacity flags below.
 GEN_EXTRA=()
-if mongo-gen generate -h 2>&1 | grep -q -- "--long-tail-burst-window"; then
+if supports_flag generate --long-tail-burst-window; then
   GEN_EXTRA+=(
     --long-tail-rate 0.008
     --long-tail-mult-min 8
@@ -119,50 +176,33 @@ case "$EXPERIMENT" in
 
   global)
     echo "[run.sh] overlays: global brownout"
-    EXTRA=()
-    if [[ "$PHENOMENON_SUPPORTED" == "1" ]]; then
-      EXTRA+=(--phenomenon global_brownout --alert-hint "alert: bad_outcome_pct > 15% for 5m (global)")
-    fi
+    mapfile -d '' EXTRA < <(phenomenon_args "global_brownout" "alert: bad_outcome_pct > 15% for 5m (global)")
     overlay 15m 70m 5 0.12 $((SEED_BASE+2)) "${EXTRA[@]}"
     ;;
 
   premium)
     echo "[run.sh] overlays: premium regression"
-    EXTRA=()
-    if [[ "$PHENOMENON_SUPPORTED" == "1" ]]; then
-      EXTRA+=(--phenomenon premium_regression --alert-hint "alert: pct_met_10s(PREMIUM) < 80% for 5m")
-    fi
+    mapfile -d '' EXTRA < <(phenomenon_args "premium_regression" "alert: pct_met_10s(PREMIUM) < 80% for 5m")
     overlay 10m 85m 7 0.25 $((SEED_BASE+3)) --filter-tier PREMIUM "${EXTRA[@]}"
     ;;
 
   basic)
     echo "[run.sh] overlays: basic recovery marker"
-    EXTRA=()
-    if [[ "$PHENOMENON_SUPPORTED" == "1" ]]; then
-      EXTRA+=(--phenomenon basic_recovery --alert-hint "expect: BASIC improves while others unchanged")
-    fi
+    mapfile -d '' EXTRA < <(phenomenon_args "basic_recovery" "expect: BASIC improves while others unchanged")
     overlay 15m 95m 0.8 0.02 $((SEED_BASE+4)) --filter-tier BASIC --set degraded=true "${EXTRA[@]}"
     ;;
 
   demo)
     echo "[run.sh] overlays: global brownout + premium regression + basic recovery"
-    EXTRA1=(); EXTRA2=(); EXTRA3=()
-    if [[ "$PHENOMENON_SUPPORTED" == "1" ]]; then
-      EXTRA1+=(--phenomenon global_brownout --alert-hint "alert: bad_outcome_pct > 15% for 5m (global)")
-      EXTRA2+=(--phenomenon premium_regression --alert-hint "alert: pct_met_10s(PREMIUM) < 80% for 5m")
-      EXTRA3+=(--phenomenon basic_recovery --alert-hint "expect: BASIC improves while others unchanged")
-    fi
+    mapfile -d '' EXTRA1 < <(phenomenon_args "global_brownout" "alert: bad_outcome_pct > 15% for 5m (global)")
+    mapfile -d '' EXTRA2 < <(phenomenon_args "premium_regression" "alert: pct_met_10s(PREMIUM) < 80% for 5m")
+    mapfile -d '' EXTRA3 < <(phenomenon_args "basic_recovery" "expect: BASIC improves while others unchanged")
 
     overlay 15m 70m 5 0.12 $((SEED_BASE+2)) "${EXTRA1[@]}"
     overlay 10m 85m 7 0.25 $((SEED_BASE+3)) --filter-tier PREMIUM "${EXTRA2[@]}"
     overlay 15m 95m 0.8 0.02 $((SEED_BASE+4)) --filter-tier BASIC --set degraded=true "${EXTRA3[@]}"
     ;;
 
-  *)
-    echo "Unknown experiment: $EXPERIMENT"
-    echo "Valid: steady | global | premium | basic | demo"
-    exit 2
-    ;;
 esac
 
 echo "[run.sh] done"

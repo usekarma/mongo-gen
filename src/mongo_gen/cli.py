@@ -9,14 +9,12 @@ from .engine import Scenario, iter_ops
 from .emit import emit, overlay_mongo
 
 
-# -------------------------
+# =========================
 # helpers
-# -------------------------
+# =========================
 
 def _dur(s: str) -> timedelta:
-    """
-    Parse a compact duration like: 10s, 2m, 1h
-    """
+    """Parse a compact duration like: 10s, 2m, 1h."""
     s = s.strip()
     if len(s) < 2:
         raise ValueError(f"invalid duration: {s!r}")
@@ -32,9 +30,7 @@ def _dur(s: str) -> timedelta:
 
 
 def _parse_utc_time(s: str) -> datetime:
-    """
-    Parse ISO-8601 like '2025-12-30T01:24:24Z' into aware UTC datetime.
-    """
+    """Parse ISO-8601 into aware UTC datetime."""
     s = s.strip()
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
@@ -44,19 +40,13 @@ def _parse_utc_time(s: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def _iso_z(dt: datetime) -> str:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 def _print_json(obj: dict) -> None:
     print(json.dumps(obj, sort_keys=True))
 
 
-# -------------------------
+# =========================
 # cli
-# -------------------------
+# =========================
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="mongo-gen")
@@ -66,11 +56,8 @@ def main(argv=None) -> int:
     # anchor
     # -------------------------
     a = g.add_parser("anchor", help="Print an anchored time window for composition.")
-    a.add_argument("--duration", required=True, help="e.g. 10m, 2m, 30s")
-    a.add_argument(
-        "--end-time",
-        help="UTC end time (ISO-8601 Z). If omitted, uses now().",
-    )
+    a.add_argument("--duration", required=True)
+    a.add_argument("--end-time", help="UTC end time (ISO-8601 Z). If omitted, uses now().")
 
     def _run_anchor(args) -> int:
         dur = _dur(args.duration)
@@ -78,8 +65,8 @@ def main(argv=None) -> int:
         start = end - dur
         _print_json(
             {
-                "start_time": _iso_z(start),
-                "end_time": _iso_z(end),
+                "start_time": start.isoformat(),
+                "end_time": end.isoformat(),
                 "duration": args.duration,
             }
         )
@@ -91,8 +78,8 @@ def main(argv=None) -> int:
     # generate
     # -------------------------
     c = g.add_parser("generate", help="Generate a baseline run stream.")
-    c.add_argument("--duration", required=True, help="e.g. 10m, 2m, 30s")
-    c.add_argument("--start-time", help="UTC start time (ISO-8601 Z). If omitted, now()-duration.")
+    c.add_argument("--duration", required=True)
+    c.add_argument("--start-time")
     c.add_argument("--seed", type=int, default=123)
     c.add_argument("--rps", type=float, default=2.0)
     c.add_argument("--ids", choices=["deterministic", "random"], default="deterministic")
@@ -100,35 +87,26 @@ def main(argv=None) -> int:
     # Scenario knobs
     c.add_argument("--base-latency-ms", type=int, default=250)
     c.add_argument("--error-rate", type=float, default=0.02)
+    c.add_argument("--subscriber-pool", type=int, default=50)
+    c.add_argument("--subscriber-skew", type=float, default=1.2)
+
     c.add_argument("--long-tail-rate", type=float, default=0.01)
     c.add_argument("--long-tail-mult-min", type=float, default=5.0)
     c.add_argument("--long-tail-mult-max", type=float, default=10.0)
-    c.add_argument("--long-tail-burst-window", type=int, default=0,
-                   help="If >0, cluster long-tail into episodes lasting N seconds (e.g. 30)")
-    c.add_argument("--long-tail-burst-label", default=None,
-                   help="If set, stamp this label on runs affected by long-tail episodes")
-    c.add_argument("--capacity-knee-threshold-ms", type=int, default=0,
-                   help="If >0, create a nonlinear cliff once latency exceeds this threshold")
-    c.add_argument("--capacity-knee-mult", type=float, default=1.0,
-                   help="Multiplier applied when capacity knee threshold is exceeded")
-    c.add_argument("--subscriber-pool", type=int, default=50)
+    c.add_argument("--long-tail-burst-window", type=int, default=0)
+    c.add_argument("--long-tail-burst-label")
 
-    # ⭐ THE IMPORTANT ONE ⭐
-    c.add_argument(
-        "--subscriber-skew",
-        type=float,
-        default=1.2,
-        help="0=uniform subscribers, higher => few subscribers dominate traffic",
-    )
+    c.add_argument("--capacity-knee-threshold-ms", type=int, default=0)
+    c.add_argument("--capacity-knee-mult", type=float, default=1.0)
 
-    # Output / emit
+    # Output
     c.add_argument("--emit", choices=["jsonl", "mongo"], default="jsonl")
-    c.add_argument("--out", default="-", help="For --emit jsonl: path or '-' for stdout.")
-    c.add_argument("--drop", action="store_true", help="For --emit mongo: drop collection first.")
+    c.add_argument("--out", default="-")
+    c.add_argument("--drop", action="store_true")
 
     # Mongo target
-    c.add_argument("--mongo-uri", help="MongoDB URI (required for --emit mongo)")
-    c.add_argument("--mongo-db", help="Mongo DB name (required for --emit mongo)")
+    c.add_argument("--mongo-uri")
+    c.add_argument("--mongo-db")
     c.add_argument("--mongo-coll", default="report_runs")
 
     def _run_generate(args) -> int:
@@ -145,12 +123,17 @@ def main(argv=None) -> int:
             error_rate=args.error_rate,
             subscriber_pool=args.subscriber_pool,
             subscriber_skew=args.subscriber_skew,
+            long_tail_rate=args.long_tail_rate,
+            long_tail_mult_min=args.long_tail_mult_min,
+            long_tail_mult_max=args.long_tail_mult_max,
+            long_tail_burst_window_s=args.long_tail_burst_window,
+            long_tail_burst_label=args.long_tail_burst_label,
+            capacity_knee_threshold_ms=args.capacity_knee_threshold_ms,
+            capacity_knee_mult=args.capacity_knee_mult,
         )
 
-        ops = iter_ops(scenario)
-
         return emit(
-            ops=ops,
+            ops=iter_ops(scenario),
             emit=args.emit,
             out=args.out,
             drop=args.drop,
@@ -164,36 +147,28 @@ def main(argv=None) -> int:
     # -------------------------
     # overlay
     # -------------------------
-    o = g.add_parser("overlay", help="Patch an anchored baseline window (Mongo-only).")
+    o = g.add_parser("overlay", help="Patch a baseline window (Mongo-only).")
 
-    # Baseline window definition
-    o.add_argument("--duration", required=True, help="Baseline duration (e.g. 10m)")
-    o.add_argument("--start-time", required=True, help="Baseline UTC start time (ISO8601 Z)")
-
-    # Overlay window
-    o.add_argument("--window", required=True, help="Overlay window size (e.g. 2m)")
+    o.add_argument("--duration", required=True)
+    o.add_argument("--start-time", required=True)
+    o.add_argument("--window", required=True)
 
     place = o.add_mutually_exclusive_group(required=True)
-    place.add_argument("--tail", action="store_true", help="Place overlay at end of baseline window")
-    place.add_argument("--head", action="store_true", help="Place overlay at start of baseline window")
-    place.add_argument("--offset", help="Offset into baseline (e.g. 4m)")
+    place.add_argument("--tail", action="store_true")
+    place.add_argument("--head", action="store_true")
+    place.add_argument("--offset")
 
-    # Targeting
-    o.add_argument("--filter-tier", help="Only affect this subscriber tier (e.g. PREMIUM)")
-    o.add_argument("--phenomenon", help="Stamp a phenomenon label on affected docs (e.g. tenant_brownout)")
-    o.add_argument("--alert-hint", help="Short human-readable alert hint to store on affected docs")
-    o.add_argument("--filter-report-type", help="Only affect this report type (e.g. BASIC)")
-    o.add_argument("--filter-subscriber", help="Only affect this subscriber_id (e.g. sub-0042)")
+    o.add_argument("--filter-tier")
+    o.add_argument("--filter-report-type")
+    o.add_argument("--filter-subscriber")
+    o.add_argument("--phenomenon")
+    o.add_argument("--alert-hint")
 
-    # Overlay effects
     o.add_argument("--latency-mult", type=float, default=4.0)
     o.add_argument("--fail-rate", type=float, default=0.15)
     o.add_argument("--seed", type=int, default=999)
+    o.add_argument("--set", action="append", default=[])
 
-    # Extra fields
-    o.add_argument("--set", action="append", default=[], help="Extra $set fields (key=value)")
-
-    # Mongo target
     o.add_argument("--mongo-uri", required=True)
     o.add_argument("--mongo-db", required=True)
     o.add_argument("--mongo-coll", default="report_runs")
@@ -205,7 +180,7 @@ def main(argv=None) -> int:
 
         win = _dur(args.window)
         if win <= timedelta(0) or win > base_dur:
-            raise ValueError("--window must be >0 and <= baseline --duration")
+            raise ValueError("--window must be >0 and <= baseline duration")
 
         if args.tail:
             ov_start = base_end - win
@@ -214,36 +189,40 @@ def main(argv=None) -> int:
         else:
             off = _dur(args.offset)
             ov_start = base_start + off
-            if ov_start < base_start or (ov_start + win) > base_end:
+            if ov_start < base_start or ov_start + win > base_end:
                 raise ValueError("--offset places overlay outside baseline window")
 
         ov_end = ov_start + win
 
-        # Parse --set key=value pairs
-        extra_set: dict = {}
+        extra_set = {}
         for kv in args.set:
-            if "=" not in kv:
+            k, _, v = kv.partition("=")
+            if not k:
                 raise ValueError(f"--set must be key=value, got {kv!r}")
-            k, v = kv.split("=", 1)
             v = v.strip()
             if v.lower() in ("true", "false"):
                 v = v.lower() == "true"
             else:
-                try:
-                    v = int(v)
-                except ValueError:
+                for cast in (int, float):
                     try:
-                        v = float(v)
+                        v = cast(v)
+                        break
                     except ValueError:
                         pass
             extra_set[k.strip()] = v
+            
+            # Wire explicit overlay annotations
+            if args.phenomenon:
+                extra_set.setdefault("phenomenon", args.phenomenon)
+            if args.alert_hint:
+                extra_set.setdefault("alert_hint", args.alert_hint)
 
         return overlay_mongo(
             mongo_uri=args.mongo_uri,
             mongo_db=args.mongo_db,
             mongo_coll=args.mongo_coll,
-            overlay_start=_iso_z(ov_start),
-            overlay_end=_iso_z(ov_end),
+            overlay_start=ov_start,
+            overlay_end=ov_end,
             latency_mult=args.latency_mult,
             fail_rate=args.fail_rate,
             seed=args.seed,
