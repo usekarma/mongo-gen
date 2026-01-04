@@ -171,6 +171,11 @@ else
   echo "[run.sh] dag disabled (either DAG=0 or mongo-gen lacks --dag)"
 fi
 
+# Prevent DAG↔SLA drift: when we reset report_runs with --drop, also reset DAG collections.
+mongosh "$MONGO_URI/$MONGO_DB" --quiet --eval \
+'db.report_requests.drop(); db.report_attempts.drop(); db.dependency_calls.drop(); db.outcomes.drop();' \
+>/dev/null 2>&1 || true
+
 mongo-gen generate \
   --duration "${HOURS}h" \
   --start-time "$START" \
